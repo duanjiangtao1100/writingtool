@@ -102,6 +102,7 @@ export function useOutline(outlineId?: string) {
   const loadAllOutlinesData = async () => {
     try {
       const data = await loadAllOutlines();
+      data.sort((a, b) => b.updatedAt - a.updatedAt);
       setAllOutlines(data);
     } catch (err) {
       console.error('Failed to load outlines:', err);

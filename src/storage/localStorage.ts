@@ -13,6 +13,7 @@ interface StyleAnalysis {
 
 const LLM_CONFIG_KEY = 'llm-config';
 const STYLE_ANALYSIS_KEY = 'style-analysis';
+const CURRENT_OUTLINE_ID_KEY = 'current-outline-id';
 
 export function saveLLMConfig(config: LLMConfig): void {
   localStorage.setItem(LLM_CONFIG_KEY, JSON.stringify(config));
@@ -40,4 +41,12 @@ export function loadStyleAnalysis(): StyleAnalysis | null {
   } catch {
     return null;
   }
+}
+
+export function saveCurrentOutlineId(outlineId: string): void {
+  localStorage.setItem(CURRENT_OUTLINE_ID_KEY, outlineId);
+}
+
+export function loadCurrentOutlineId(): string | null {
+  return localStorage.getItem(CURRENT_OUTLINE_ID_KEY);
 }

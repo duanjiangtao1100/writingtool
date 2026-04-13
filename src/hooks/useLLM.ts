@@ -12,14 +12,13 @@ interface LLMConfig {
 interface LLMCallOptions {
   config: LLMConfig;
   prompt: string;
-  onProgress?: (text: string) => void;
 }
 
 export function useLLM() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const callLLM = async ({ config, prompt, onProgress }: LLMCallOptions): Promise<string> => {
+  const callLLM = async ({ config, prompt }: LLMCallOptions): Promise<string> => {
     setIsLoading(true);
     setError(null);
 
