@@ -7,6 +7,35 @@ interface NovelUploaderProps {
   onNovelUploaded: (content: string) => void;
 }
 
+function decodeTextContent(arrayBuffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(arrayBuffer);
+
+  const hasUtf8Bom = bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+  if (hasUtf8Bom) {
+    return new TextDecoder('utf-8').decode(bytes);
+  }
+
+  const hasUtf16LeBom = bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe;
+  if (hasUtf16LeBom) {
+    return new TextDecoder('utf-16le').decode(bytes);
+  }
+
+  const hasUtf16BeBom = bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff;
+  if (hasUtf16BeBom) {
+    return new TextDecoder('utf-16be').decode(bytes);
+  }
+
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {}
+
+  try {
+    return new TextDecoder('gb18030').decode(bytes);
+  } catch {}
+
+  return new TextDecoder().decode(bytes);
+}
+
 export function NovelUploader({ onNovelUploaded }: NovelUploaderProps) {
   const [content, setContent] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -24,12 +53,9 @@ export function NovelUploader({ onNovelUploaded }: NovelUploaderProps) {
         setContent(result.value);
       } else {
         // 处理纯文本文件
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          const text = event.target?.result as string;
-          setContent(text);
-        };
-        reader.readAsText(file);
+        const arrayBuffer = await file.arrayBuffer();
+        const text = decodeTextContent(arrayBuffer);
+        setContent(text);
       }
     } catch (err) {
       console.error('文件读取失败:', err);
