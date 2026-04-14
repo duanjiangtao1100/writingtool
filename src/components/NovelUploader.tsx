@@ -1,5 +1,3 @@
-// 小说上传组件
-
 import { useState } from 'react';
 import mammoth from 'mammoth';
 
@@ -7,8 +5,14 @@ interface NovelUploaderProps {
   onNovelUploaded: (content: string) => void;
 }
 
-function decodeTextContent(arrayBuffer: ArrayBuffer): string {
+type TextEncoding = 'auto' | 'utf-8' | 'gb18030';
+
+function decodeTextContent(arrayBuffer: ArrayBuffer, encoding: TextEncoding): string {
   const bytes = new Uint8Array(arrayBuffer);
+
+  if (encoding !== 'auto') {
+    return new TextDecoder(encoding).decode(bytes);
+  }
 
   const hasUtf8Bom = bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
   if (hasUtf8Bom) {
@@ -39,6 +43,7 @@ function decodeTextContent(arrayBuffer: ArrayBuffer): string {
 export function NovelUploader({ onNovelUploaded }: NovelUploaderProps) {
   const [content, setContent] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [textEncoding, setTextEncoding] = useState<TextEncoding>('auto');
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -47,14 +52,12 @@ export function NovelUploader({ onNovelUploaded }: NovelUploaderProps) {
     setIsLoading(true);
     try {
       if (file.name.toLowerCase().endsWith('.docx')) {
-        // 处理 docx 文件
         const arrayBuffer = await file.arrayBuffer();
         const result = await mammoth.extractRawText({ arrayBuffer });
         setContent(result.value);
       } else {
-        // 处理纯文本文件
         const arrayBuffer = await file.arrayBuffer();
-        const text = decodeTextContent(arrayBuffer);
+        const text = decodeTextContent(arrayBuffer, textEncoding);
         setContent(text);
       }
     } catch (err) {
@@ -77,12 +80,26 @@ export function NovelUploader({ onNovelUploaded }: NovelUploaderProps) {
       <div style={{ marginBottom: '10px' }}>
         <input type="file" accept=".txt,.md,.docx" onChange={handleFileUpload} />
         <p style={{ fontSize: '12px', color: '#666' }}>
-          支持格式：.txt, .md, .docx
+          支持格式：.txt、.md、.docx
         </p>
       </div>
+
+      <div style={{ marginBottom: '10px' }}>
+        <label style={{ display: 'block', marginBottom: '5px' }}>文本编码</label>
+        <select
+          value={textEncoding}
+          onChange={(e) => setTextEncoding(e.target.value as TextEncoding)}
+          style={{ minWidth: '220px', padding: '6px' }}
+        >
+          <option value="auto">自动检测（推荐）</option>
+          <option value="utf-8">UTF-8</option>
+          <option value="gb18030">GB18030（兼容 GBK/ANSI）</option>
+        </select>
+      </div>
+
       <div style={{ marginBottom: '10px' }}>
         <label style={{ display: 'block', marginBottom: '5px' }}>
-          或者直接粘贴内容:
+          或者直接粘贴内容
         </label>
         <textarea
           value={content}
