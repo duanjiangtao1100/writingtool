@@ -55,9 +55,9 @@ interface StyleAnalysis {
 
 type AppState = 'settings' | 'upload' | 'analysis' | 'outline' | 'chapters';
 
-const DEFAULT_OUTLINE_CHAPTER_COUNT = 100;
+const DEFAULT_OUTLINE_CHAPTER_COUNT = 50;
 const MIN_OUTLINE_CHAPTER_COUNT = 1;
-const MAX_OUTLINE_CHAPTER_COUNT = 200;
+const MAX_OUTLINE_CHAPTER_COUNT = 50;
 
 function normalizeOutlineChapterCount(value: number): number {
   if (!Number.isFinite(value)) {
@@ -65,6 +65,13 @@ function normalizeOutlineChapterCount(value: number): number {
   }
 
   return Math.min(MAX_OUTLINE_CHAPTER_COUNT, Math.max(MIN_OUTLINE_CHAPTER_COUNT, Math.floor(value)));
+}
+
+function parseKeyElementsInput(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
 }
 
 function extractAndParseJSON(text: string): any {
@@ -300,8 +307,12 @@ function App() {
   const [currentChapterNumber, setCurrentChapterNumber] = useState(1);
   const [outlineChapterCountInput, setOutlineChapterCountInput] = useState(() => {
     const savedChapterCount = loadOutlineChapterCount();
-    return String(savedChapterCount ?? DEFAULT_OUTLINE_CHAPTER_COUNT);
+    return String(normalizeOutlineChapterCount(savedChapterCount ?? DEFAULT_OUTLINE_CHAPTER_COUNT));
   });
+  const [isEditingAnalysis, setIsEditingAnalysis] = useState(false);
+  const [editedStyleDescription, setEditedStyleDescription] = useState('');
+  const [editedKeyElements, setEditedKeyElements] = useState('');
+  const [editedPlotPatternAnalysis, setEditedPlotPatternAnalysis] = useState('');
 
   const { isLoading, error, callLLM } = useLLM();
   const { outline, allOutlines, saveOutlineData, setOutline } = useOutline(currentOutlineId || undefined);
@@ -330,8 +341,8 @@ function App() {
     }
   }, [chapters, currentChapterNumber]);
 
-  const generateOutline = useCallback(async (chapterCount: number) => {
-    const currentStyleAnalysis = styleAnalysis && styleAnalysis.styleDescription ? styleAnalysis : loadStyleAnalysis();
+  const generateOutline = useCallback(async (chapterCount: number, overrideStyleAnalysis?: StyleAnalysis) => {
+    const currentStyleAnalysis = overrideStyleAnalysis ?? (styleAnalysis && styleAnalysis.styleDescription ? styleAnalysis : loadStyleAnalysis());
 
     if (!llmConfig) {
       alert('请先配置 LLM 设置');
@@ -415,6 +426,7 @@ function App() {
       console.log('Saved to localStorage');
       setStyleAnalysis(analysis);
       console.log('Set styleAnalysis state');
+      setIsEditingAnalysis(false);
       setAppState('analysis');
       console.log('Set appState to analysis');
     } catch (err) {
@@ -473,6 +485,57 @@ function App() {
   }, [callLLM, getPreviousChaptersSummary, llmConfig, outline, saveChapterData, saveOutlineData, styleAnalysis]);
 
   const savedAnalysis = styleAnalysis && styleAnalysis.styleDescription ? styleAnalysis : loadStyleAnalysis();
+
+  const startEditingAnalysis = useCallback(() => {
+    if (!savedAnalysis) {
+      return;
+    }
+
+    setEditedStyleDescription(savedAnalysis.styleDescription);
+    setEditedKeyElements(savedAnalysis.keyElements.join('\n'));
+    setEditedPlotPatternAnalysis(savedAnalysis.plotPatternAnalysis);
+    setIsEditingAnalysis(true);
+  }, [savedAnalysis]);
+
+  const saveEditedAnalysis = useCallback((): StyleAnalysis | null => {
+    const styleDescription = editedStyleDescription.trim();
+    if (!styleDescription) {
+      alert('风格描述不能为空');
+      return null;
+    }
+
+    const updatedAnalysis: StyleAnalysis = {
+      styleDescription,
+      keyElements: parseKeyElementsInput(editedKeyElements),
+      plotPatternAnalysis: editedPlotPatternAnalysis.trim(),
+    };
+
+    saveStyleAnalysis(updatedAnalysis);
+    setStyleAnalysis(updatedAnalysis);
+    setIsEditingAnalysis(false);
+    return updatedAnalysis;
+  }, [editedKeyElements, editedPlotPatternAnalysis, editedStyleDescription]);
+
+  const cancelEditingAnalysis = useCallback(() => {
+    setIsEditingAnalysis(false);
+  }, []);
+
+  const handleGenerateOutline = useCallback(() => {
+    const normalized = normalizeOutlineChapterCount(Number.parseInt(outlineChapterCountInput, 10));
+    setOutlineChapterCountInput(String(normalized));
+    saveOutlineChapterCount(normalized);
+
+    let analysisForOutline = savedAnalysis;
+    if (isEditingAnalysis) {
+      const saved = saveEditedAnalysis();
+      if (!saved) {
+        return;
+      }
+      analysisForOutline = saved;
+    }
+
+    void generateOutline(normalized, analysisForOutline ?? undefined);
+  }, [generateOutline, isEditingAnalysis, outlineChapterCountInput, saveEditedAnalysis, savedAnalysis]);
 
   return (
     <div className="App">
@@ -536,19 +599,56 @@ function App() {
             <>
               <div style={{ marginBottom: '20px' }}>
                 <h3>风格描述</h3>
-                <p>{savedAnalysis.styleDescription}</p>
+                {isEditingAnalysis ? (
+                  <textarea
+                    value={editedStyleDescription}
+                    onChange={(e) => setEditedStyleDescription(e.target.value)}
+                    style={{ width: '100%', minHeight: '100px', padding: '8px' }}
+                  />
+                ) : (
+                  <p>{savedAnalysis.styleDescription}</p>
+                )}
               </div>
               <div style={{ marginBottom: '20px' }}>
                 <h3>关键元素</h3>
-                <ul>
-                  {savedAnalysis.keyElements.map((elem, index) => (
-                    <li key={index}>{elem}</li>
-                  ))}
-                </ul>
+                {isEditingAnalysis ? (
+                  <textarea
+                    value={editedKeyElements}
+                    onChange={(e) => setEditedKeyElements(e.target.value)}
+                    placeholder="每行一个关键元素"
+                    style={{ width: '100%', minHeight: '140px', padding: '8px' }}
+                  />
+                ) : (
+                  <ul>
+                    {savedAnalysis.keyElements.map((elem, index) => (
+                      <li key={index}>{elem}</li>
+                    ))}
+                  </ul>
+                )}
               </div>
               <div style={{ marginBottom: '20px' }}>
                 <h3>剧情模式分析</h3>
-                <p>{savedAnalysis.plotPatternAnalysis || '暂无剧情模式分析结果'}</p>
+                {isEditingAnalysis ? (
+                  <textarea
+                    value={editedPlotPatternAnalysis}
+                    onChange={(e) => setEditedPlotPatternAnalysis(e.target.value)}
+                    style={{ width: '100%', minHeight: '80px', padding: '8px' }}
+                  />
+                ) : (
+                  <p>{savedAnalysis.plotPatternAnalysis || '暂无剧情模式分析结果'}</p>
+                )}
+              </div>
+              <div style={{ marginBottom: '20px' }}>
+                {isEditingAnalysis ? (
+                  <>
+                    <button onClick={saveEditedAnalysis} style={{ marginRight: '8px' }}>
+                      保存分析
+                    </button>
+                    <button onClick={cancelEditingAnalysis}>取消</button>
+                  </>
+                ) : (
+                  <button onClick={startEditingAnalysis}>编辑分析</button>
+                )}
               </div>
               <div style={{ marginBottom: '20px' }}>
                 <label htmlFor="outline-chapter-count" style={{ display: 'block', marginBottom: '8px', fontWeight: 600 }}>
@@ -574,15 +674,7 @@ function App() {
                 </div>
               </div>
               <button
-                onClick={() => {
-                  const normalized = normalizeOutlineChapterCount(Number.parseInt(outlineChapterCountInput, 10));
-                  setOutlineChapterCountInput(String(normalized));
-                  saveOutlineChapterCount(normalized);
-                  if (!styleAnalysis || !styleAnalysis.styleDescription) {
-                    setStyleAnalysis(savedAnalysis);
-                  }
-                  void generateOutline(normalized);
-                }}
+                onClick={handleGenerateOutline}
                 style={{ padding: '10px 20px', fontSize: '16px' }}
               >
                 生成大纲
