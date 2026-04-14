@@ -42,8 +42,14 @@ async function saveChapter(outlineId: string, chapter: NovelChapter): Promise<vo
     const tx = db.transaction(['chapters'], 'readwrite');
     const store = tx.objectStore('chapters');
     const request = store.put({ ...chapter, outlineId });
-    request.onsuccess = () => resolve();
+
     request.onerror = () => reject(request.error);
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
   });
 }
 

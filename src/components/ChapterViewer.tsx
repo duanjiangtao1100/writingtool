@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react';
+
 interface NovelChapter {
   id: string;
   chapterNumber: number;
@@ -11,6 +13,7 @@ interface ChapterViewerProps {
   currentChapterNumber: number;
   onChapterChange: (chapterNumber: number) => void;
   outlineTitle?: string;
+  onChapterUpdate?: (chapter: NovelChapter) => Promise<void> | void;
 }
 
 export function ChapterViewer({
@@ -18,8 +21,91 @@ export function ChapterViewer({
   currentChapterNumber,
   onChapterChange,
   outlineTitle,
+  onChapterUpdate,
 }: ChapterViewerProps) {
   const currentChapter = chapters.find((chapter) => chapter.chapterNumber === currentChapterNumber) || chapters[0];
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftContent, setDraftContent] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+  const [isCopied, setIsCopied] = useState(false);
+
+  useEffect(() => {
+    if (!currentChapter) {
+      return;
+    }
+
+    setDraftContent(currentChapter.content);
+    setIsEditing(false);
+    setIsCopied(false);
+  }, [currentChapter]);
+
+  const fallbackCopyText = (text: string) => {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    textarea.style.pointerEvents = 'none';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textarea);
+  };
+
+  const handleCopy = async () => {
+    if (!currentChapter) {
+      return;
+    }
+
+    const text = isEditing ? draftContent : currentChapter.content;
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        fallbackCopyText(text);
+      }
+    } catch {
+      fallbackCopyText(text);
+    }
+
+    setIsCopied(true);
+    window.setTimeout(() => setIsCopied(false), 1500);
+  };
+
+  const handleEditOrSave = async () => {
+    if (!isEditing) {
+      setIsEditing(true);
+      return;
+    }
+
+    if (!currentChapter || !onChapterUpdate) {
+      setIsEditing(false);
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      await onChapterUpdate({
+        ...currentChapter,
+        content: draftContent,
+      });
+      setIsEditing(false);
+    } catch (error) {
+      console.error('保存章节失败:', error);
+      alert('保存失败，请稍后重试');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleCancelEdit = () => {
+    if (!currentChapter) {
+      return;
+    }
+
+    setDraftContent(currentChapter.content);
+    setIsEditing(false);
+  };
 
   if (chapters.length === 0) {
     return (
@@ -41,13 +127,9 @@ export function ChapterViewer({
         }}
       >
         <div style={{ padding: '16px', borderBottom: '1px solid #e5e7eb' }}>
-          <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '6px' }}>
-            {outlineTitle || '当前大纲'}
-          </div>
+          <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '6px' }}>{outlineTitle || '当前大纲'}</div>
           <div style={{ fontSize: '18px', fontWeight: 700 }}>章节列表</div>
-          <div style={{ fontSize: '12px', color: '#6b7280', marginTop: '6px' }}>
-            已生成 {chapters.length} 章
-          </div>
+          <div style={{ fontSize: '12px', color: '#6b7280', marginTop: '6px' }}>已生成 {chapters.length} 章</div>
         </div>
 
         {chapters.map((chapter) => {
@@ -73,9 +155,7 @@ export function ChapterViewer({
               <div style={{ fontWeight: 600, color: '#111827', marginBottom: '4px' }}>
                 {chapter.title || `第 ${chapter.chapterNumber} 章`}
               </div>
-              <div style={{ fontSize: '12px', color: '#6b7280' }}>
-                {new Date(chapter.createdAt).toLocaleString()}
-              </div>
+              <div style={{ fontSize: '12px', color: '#6b7280' }}>{new Date(chapter.createdAt).toLocaleString()}</div>
             </button>
           );
         })}
@@ -93,18 +173,87 @@ export function ChapterViewer({
             boxShadow: '0 8px 24px rgba(15, 23, 42, 0.04)',
           }}
         >
-          <div style={{ fontSize: '13px', color: '#6b7280', marginBottom: '8px' }}>
-            {outlineTitle || '当前大纲'}
-          </div>
+          <div style={{ fontSize: '13px', color: '#6b7280', marginBottom: '8px' }}>{outlineTitle || '当前大纲'}</div>
           <h2 style={{ marginTop: 0, marginBottom: '8px' }}>
-            第 {currentChapter.chapterNumber} 章 {currentChapter.title}
+            第 {currentChapter.chapterNumber} 章 · {currentChapter.title}
           </h2>
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginBottom: '12px' }}>
+            <button
+              onClick={() => {
+                void handleEditOrSave();
+              }}
+              disabled={isSaving}
+              style={{
+                border: '1px solid #d1d5db',
+                backgroundColor: '#fff',
+                color: '#111827',
+                padding: '6px 12px',
+                borderRadius: '8px',
+                cursor: isSaving ? 'not-allowed' : 'pointer',
+                opacity: isSaving ? 0.6 : 1,
+              }}
+            >
+              {isSaving ? '保存中...' : isEditing ? '保存' : '编辑'}
+            </button>
+            {isEditing && (
+              <button
+                onClick={handleCancelEdit}
+                disabled={isSaving}
+                style={{
+                  border: '1px solid #d1d5db',
+                  backgroundColor: '#fff',
+                  color: '#111827',
+                  padding: '6px 12px',
+                  borderRadius: '8px',
+                  cursor: isSaving ? 'not-allowed' : 'pointer',
+                  opacity: isSaving ? 0.6 : 1,
+                }}
+              >
+                取消编辑
+              </button>
+            )}
+            <button
+              onClick={() => {
+                void handleCopy();
+              }}
+              style={{
+                border: '1px solid #d1d5db',
+                backgroundColor: '#fff',
+                color: '#111827',
+                padding: '6px 12px',
+                borderRadius: '8px',
+                cursor: 'pointer',
+              }}
+            >
+              {isCopied ? '已复制' : '复制'}
+            </button>
+          </div>
+
           <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '20px' }}>
             生成时间：{new Date(currentChapter.createdAt).toLocaleString()}
           </div>
-          <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.9, color: '#111827' }}>
-            {currentChapter.content}
-          </div>
+
+          {isEditing ? (
+            <textarea
+              value={draftContent}
+              onChange={(event) => setDraftContent(event.target.value)}
+              style={{
+                width: '100%',
+                minHeight: '420px',
+                border: '1px solid #d1d5db',
+                borderRadius: '8px',
+                padding: '12px',
+                lineHeight: 1.9,
+                color: '#111827',
+                fontFamily: 'inherit',
+                fontSize: '15px',
+                resize: 'vertical',
+              }}
+            />
+          ) : (
+            <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.9, color: '#111827' }}>{currentChapter.content}</div>
+          )}
         </div>
       </main>
     </div>

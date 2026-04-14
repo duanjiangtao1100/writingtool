@@ -536,6 +536,7 @@ function App() {
           currentChapterNumber={currentChapterNumber}
           onChapterChange={setCurrentChapterNumber}
           outlineTitle={outline?.title}
+          onChapterUpdate={saveChapterData}
         />
       )}
     </div>
