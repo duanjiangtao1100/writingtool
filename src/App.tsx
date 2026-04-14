@@ -9,8 +9,10 @@ import { useChapters } from './hooks/useChapters';
 import {
   loadCurrentOutlineId,
   loadLLMConfig,
+  loadOutlineChapterCount,
   loadStyleAnalysis,
   saveCurrentOutlineId,
+  saveOutlineChapterCount,
   saveStyleAnalysis,
 } from './storage/localStorage';
 import './App.css';
@@ -48,9 +50,22 @@ interface NovelOutline {
 interface StyleAnalysis {
   styleDescription: string;
   keyElements: string[];
+  plotPatternAnalysis: string;
 }
 
 type AppState = 'settings' | 'upload' | 'analysis' | 'outline' | 'chapters';
+
+const DEFAULT_OUTLINE_CHAPTER_COUNT = 100;
+const MIN_OUTLINE_CHAPTER_COUNT = 1;
+const MAX_OUTLINE_CHAPTER_COUNT = 200;
+
+function normalizeOutlineChapterCount(value: number): number {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_OUTLINE_CHAPTER_COUNT;
+  }
+
+  return Math.min(MAX_OUTLINE_CHAPTER_COUNT, Math.max(MIN_OUTLINE_CHAPTER_COUNT, Math.floor(value)));
+}
 
 function extractAndParseJSON(text: string): any {
   const cleaned = text
@@ -129,11 +144,23 @@ function parseStyleAnalysisResponse(response: string): StyleAnalysis {
   const parsed = extractAndParseJSON(response);
 
   if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const plotPatternAnalysis =
+      typeof parsed.plotPatternAnalysis === 'string'
+        ? parsed.plotPatternAnalysis.trim()
+        : typeof parsed.plotPattern === 'string'
+          ? parsed.plotPattern.trim()
+          : typeof parsed.storyPatternAnalysis === 'string'
+            ? parsed.storyPatternAnalysis.trim()
+            : typeof parsed['剧情模式分析'] === 'string'
+              ? parsed['剧情模式分析'].trim()
+              : '';
+
     return {
       styleDescription: typeof parsed.styleDescription === 'string' ? parsed.styleDescription.trim() : response.trim(),
       keyElements: Array.isArray(parsed.keyElements)
         ? parsed.keyElements.filter((item): item is string => typeof item === 'string')
         : [],
+      plotPatternAnalysis,
     };
   }
 
@@ -141,12 +168,14 @@ function parseStyleAnalysisResponse(response: string): StyleAnalysis {
     return {
       styleDescription: response.trim(),
       keyElements: parsed.filter((item): item is string => typeof item === 'string'),
+      plotPatternAnalysis: '',
     };
   }
 
   return {
     styleDescription: response.trim(),
     keyElements: [],
+    plotPatternAnalysis: '',
   };
 }
 
@@ -207,10 +236,14 @@ const ANALYSIS_PROMPT = `你是一个专业的小说风格分析师。请分析�
 
 小说内容：{{novelContent}}
 
+请额外输出 'plotPatternAnalysis' 字段，总结这部小说的剧情推进模式（例如起承转合、冲突节奏、常见反转与高潮分布）。
+该字段请优先使用“剧情链路 + 节奏总结”的一句话格式，例如：受辱 -> 得奇遇 -> 苦修 -> 打脸升级 -> 遇更强敌 -> 再苦修 -> 再次打脸。节奏明快，爽点密集。
+
 请严格输出 JSON：
 {
   "styleDescription": "...",
-  "keyElements": ["元素1", "元素2"]
+  "keyElements": ["元素1", "元素2"],
+  "plotPatternAnalysis": "受辱 -> 得奇遇 -> 苦修 -> 打脸升级 -> 遇更强敌 -> 再苦修 -> 再次打脸。节奏明快，爽点密集。"
 }`;
 
 const OUTLINE_PROMPT = `你是一个专业的网络小说作者。
@@ -219,7 +252,7 @@ const OUTLINE_PROMPT = `你是一个专业的网络小说作者。
 
 请基于上述风格，创作一个全新的小说大纲。
 要求：
-1. 总共 50 章。
+1. 总共 {{chapterCount}} 章。
 2. 每章包含 chapterNumber、title、description。
 3. 严格返回 JSON，不要附带解释文字。
 
@@ -265,6 +298,10 @@ function App() {
   const [styleAnalysis, setStyleAnalysis] = useState<StyleAnalysis | null>(() => loadStyleAnalysis());
   const [currentOutlineId, setCurrentOutlineId] = useState<string | null>(() => loadCurrentOutlineId());
   const [currentChapterNumber, setCurrentChapterNumber] = useState(1);
+  const [outlineChapterCountInput, setOutlineChapterCountInput] = useState(() => {
+    const savedChapterCount = loadOutlineChapterCount();
+    return String(savedChapterCount ?? DEFAULT_OUTLINE_CHAPTER_COUNT);
+  });
 
   const { isLoading, error, callLLM } = useLLM();
   const { outline, allOutlines, saveOutlineData, setOutline } = useOutline(currentOutlineId || undefined);
@@ -293,7 +330,7 @@ function App() {
     }
   }, [chapters, currentChapterNumber]);
 
-  const generateOutline = useCallback(async () => {
+  const generateOutline = useCallback(async (chapterCount: number) => {
     const currentStyleAnalysis = styleAnalysis && styleAnalysis.styleDescription ? styleAnalysis : loadStyleAnalysis();
 
     if (!llmConfig) {
@@ -308,7 +345,9 @@ function App() {
 
     try {
       console.log('Generating outline...');
-      const prompt = OUTLINE_PROMPT.replace('{{styleAnalysis}}', JSON.stringify(currentStyleAnalysis));
+      const prompt = OUTLINE_PROMPT
+        .replace('{{styleAnalysis}}', JSON.stringify(currentStyleAnalysis))
+        .replace('{{chapterCount}}', String(chapterCount));
       const response = await callLLM({ config: llmConfig, prompt });
       console.log('LLM response length:', response.length);
       console.log('=== FULL LLM RESPONSE START ===');
@@ -368,6 +407,7 @@ function App() {
         analysis = {
           styleDescription: response.trim(),
           keyElements: ['analysis completed'],
+          plotPatternAnalysis: '',
         };
       }
 
@@ -506,12 +546,42 @@ function App() {
                   ))}
                 </ul>
               </div>
+              <div style={{ marginBottom: '20px' }}>
+                <h3>剧情模式分析</h3>
+                <p>{savedAnalysis.plotPatternAnalysis || '暂无剧情模式分析结果'}</p>
+              </div>
+              <div style={{ marginBottom: '20px' }}>
+                <label htmlFor="outline-chapter-count" style={{ display: 'block', marginBottom: '8px', fontWeight: 600 }}>
+                  大纲章节数
+                </label>
+                <input
+                  id="outline-chapter-count"
+                  type="number"
+                  min={MIN_OUTLINE_CHAPTER_COUNT}
+                  max={MAX_OUTLINE_CHAPTER_COUNT}
+                  step={1}
+                  value={outlineChapterCountInput}
+                  onChange={(e) => setOutlineChapterCountInput(e.target.value)}
+                  onBlur={() => {
+                    const normalized = normalizeOutlineChapterCount(Number.parseInt(outlineChapterCountInput, 10));
+                    setOutlineChapterCountInput(String(normalized));
+                    saveOutlineChapterCount(normalized);
+                  }}
+                  style={{ width: '220px', padding: '8px' }}
+                />
+                <div style={{ marginTop: '6px', fontSize: '12px', color: '#6b7280' }}>
+                  支持 {MIN_OUTLINE_CHAPTER_COUNT}-{MAX_OUTLINE_CHAPTER_COUNT} 章
+                </div>
+              </div>
               <button
                 onClick={() => {
+                  const normalized = normalizeOutlineChapterCount(Number.parseInt(outlineChapterCountInput, 10));
+                  setOutlineChapterCountInput(String(normalized));
+                  saveOutlineChapterCount(normalized);
                   if (!styleAnalysis || !styleAnalysis.styleDescription) {
                     setStyleAnalysis(savedAnalysis);
                   }
-                  void generateOutline();
+                  void generateOutline(normalized);
                 }}
                 style={{ padding: '10px 20px', fontSize: '16px' }}
               >
