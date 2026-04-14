@@ -58,6 +58,8 @@ type AppState = 'settings' | 'upload' | 'analysis' | 'outline' | 'chapters';
 const DEFAULT_OUTLINE_CHAPTER_COUNT = 50;
 const MIN_OUTLINE_CHAPTER_COUNT = 1;
 const MAX_OUTLINE_CHAPTER_COUNT = 50;
+const MAX_CORE_SUMMARY_CONTEXT_CHARS = 6000;
+const MAX_PREVIOUS_SUMMARY_CONTEXT_CHARS = 3000;
 
 function normalizeOutlineChapterCount(value: number): number {
   if (!Number.isFinite(value)) {
@@ -72,6 +74,14 @@ function parseKeyElementsInput(text: string): string[] {
     .split(/\r?\n/)
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+}
+
+function clampContextText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  return text.slice(text.length - maxChars);
 }
 
 function extractAndParseJSON(text: string): any {
@@ -313,6 +323,8 @@ function App() {
   const [editedStyleDescription, setEditedStyleDescription] = useState('');
   const [editedKeyElements, setEditedKeyElements] = useState('');
   const [editedPlotPatternAnalysis, setEditedPlotPatternAnalysis] = useState('');
+  const [isBatchGeneratingChapters, setIsBatchGeneratingChapters] = useState(false);
+  const [batchGenerationProgress, setBatchGenerationProgress] = useState<{ current: number; total: number } | null>(null);
 
   const { isLoading, error, callLLM } = useLLM();
   const { outline, allOutlines, saveOutlineData, setOutline } = useOutline(currentOutlineId || undefined);
@@ -435,10 +447,57 @@ function App() {
     }
   }, [callLLM, llmConfig]);
 
-  const handleGenerateChapter = useCallback(async (chapterIndex: number) => {
+  const generateChapterForOutline = useCallback(async (
+    targetOutline: NovelOutline,
+    chapterIndex: number,
+    previousSummary: string,
+  ): Promise<NovelOutline> => {
     const currentStyleAnalysis = styleAnalysis && styleAnalysis.styleDescription ? styleAnalysis : loadStyleAnalysis();
 
-    if (!llmConfig || !outline || !currentStyleAnalysis) {
+    if (!llmConfig) {
+      throw new Error('请先配置 LLM 设置');
+    }
+
+    if (!currentStyleAnalysis) {
+      throw new Error('请先分析小说风格');
+    }
+
+    const chapter = targetOutline.chapters[chapterIndex];
+    const prompt = CHAPTER_PROMPT
+      .replace('{{styleAnalysis}}', JSON.stringify(currentStyleAnalysis))
+      .replace('{{coreSummary}}', clampContextText(targetOutline.coreSummary, MAX_CORE_SUMMARY_CONTEXT_CHARS))
+      .replace('{{previousChaptersSummary}}', clampContextText(previousSummary, MAX_PREVIOUS_SUMMARY_CONTEXT_CHARS))
+      .replace('{{chapterNumber}}', String(chapter.chapterNumber))
+      .replace('{{chapterTitle}}', chapter.title)
+      .replace('{{chapterDescription}}', chapter.description);
+
+    const content = await callLLM({ config: llmConfig, prompt });
+
+    const newChapter: NovelChapter = {
+      id: String(Date.now()),
+      chapterNumber: chapter.chapterNumber,
+      title: chapter.title,
+      content,
+      createdAt: Date.now(),
+    };
+
+    await saveChapterData(newChapter);
+
+    const summaryPrompt = SUMMARY_PROMPT.replace('{{chapterContent}}', content.slice(0, 5000));
+    const chapterSummary = await callLLM({ config: llmConfig, prompt: summaryPrompt });
+
+    const updatedOutline: NovelOutline = {
+      ...targetOutline,
+      coreSummary: targetOutline.coreSummary ? targetOutline.coreSummary + '\n\n' + chapterSummary : chapterSummary,
+      updatedAt: Date.now(),
+    };
+
+    await saveOutlineData(updatedOutline);
+    return updatedOutline;
+  }, [callLLM, llmConfig, saveChapterData, saveOutlineData, styleAnalysis]);
+
+  const handleGenerateChapter = useCallback(async (chapterIndex: number) => {
+    if (!outline) {
       return;
     }
 
@@ -446,43 +505,68 @@ function App() {
     const previousSummary = getPreviousChaptersSummary(chapter.chapterNumber);
 
     try {
-      const prompt = CHAPTER_PROMPT
-        .replace('{{styleAnalysis}}', JSON.stringify(currentStyleAnalysis))
-        .replace('{{coreSummary}}', outline.coreSummary)
-        .replace('{{previousChaptersSummary}}', previousSummary)
-        .replace('{{chapterNumber}}', String(chapter.chapterNumber))
-        .replace('{{chapterTitle}}', chapter.title)
-        .replace('{{chapterDescription}}', chapter.description);
-
-      const content = await callLLM({ config: llmConfig, prompt });
-
-      const newChapter: NovelChapter = {
-        id: String(Date.now()),
-        chapterNumber: chapter.chapterNumber,
-        title: chapter.title,
-        content,
-        createdAt: Date.now(),
-      };
-
-      await saveChapterData(newChapter);
-
-      const summaryPrompt = SUMMARY_PROMPT.replace('{{chapterContent}}', content.slice(0, 5000));
-      const chapterSummary = await callLLM({ config: llmConfig, prompt: summaryPrompt });
-
-      const updatedOutline: NovelOutline = {
-        ...outline,
-        coreSummary: outline.coreSummary ? outline.coreSummary + '\n\n' + chapterSummary : chapterSummary,
-        updatedAt: Date.now(),
-      };
-
-      await saveOutlineData(updatedOutline);
+      await generateChapterForOutline(outline, chapterIndex, previousSummary);
       setCurrentChapterNumber(chapter.chapterNumber);
       setAppState('chapters');
     } catch (err) {
       console.error('生成章节失败:', err);
       alert('生成章节失败: ' + (err instanceof Error ? err.message : '未知错误'));
     }
-  }, [callLLM, getPreviousChaptersSummary, llmConfig, outline, saveChapterData, saveOutlineData, styleAnalysis]);
+  }, [generateChapterForOutline, getPreviousChaptersSummary, outline]);
+
+  const handleGenerateAllChapters = useCallback(async (startChapterNumber: number) => {
+    if (!outline) {
+      return;
+    }
+
+    if (!llmConfig) {
+      alert('请先配置 LLM 设置');
+      return;
+    }
+
+    const currentStyleAnalysis = styleAnalysis && styleAnalysis.styleDescription ? styleAnalysis : loadStyleAnalysis();
+    if (!currentStyleAnalysis) {
+      alert('请先分析小说风格');
+      return;
+    }
+
+    if (outline.chapters.length === 0) {
+      alert('当前大纲没有可生成的章节');
+      return;
+    }
+
+    const startIndex = outline.chapters.findIndex((chapter) => chapter.chapterNumber === startChapterNumber);
+    if (startIndex === -1) {
+      alert(`当前大纲中不存在第 ${startChapterNumber} 章`);
+      return;
+    }
+
+    const totalToGenerate = outline.chapters.length - startIndex;
+
+    setIsBatchGeneratingChapters(true);
+    setBatchGenerationProgress({ current: 0, total: totalToGenerate });
+
+    try {
+      let workingOutline = outline;
+
+      for (let index = startIndex; index < workingOutline.chapters.length; index++) {
+        setBatchGenerationProgress({ current: index - startIndex + 1, total: totalToGenerate });
+        workingOutline = await generateChapterForOutline(workingOutline, index, '');
+      }
+
+      const lastChapter = workingOutline.chapters[workingOutline.chapters.length - 1];
+      if (lastChapter) {
+        setCurrentChapterNumber(lastChapter.chapterNumber);
+      }
+      setAppState('chapters');
+    } catch (err) {
+      console.error('批量生成章节失败:', err);
+      alert('批量生成章节失败: ' + (err instanceof Error ? err.message : '未知错误'));
+    } finally {
+      setIsBatchGeneratingChapters(false);
+      setBatchGenerationProgress(null);
+    }
+  }, [generateChapterForOutline, llmConfig, outline, styleAnalysis]);
 
   const savedAnalysis = styleAnalysis && styleAnalysis.styleDescription ? styleAnalysis : loadStyleAnalysis();
 
@@ -689,7 +773,14 @@ function App() {
       )}
 
       {appState === 'outline' && outline && (
-        <OutlineEditor outline={outline} onUpdate={saveOutlineData} onGenerateChapter={handleGenerateChapter} />
+        <OutlineEditor
+          outline={outline}
+          onUpdate={saveOutlineData}
+          onGenerateChapter={handleGenerateChapter}
+          onGenerateAllChapters={handleGenerateAllChapters}
+          isGeneratingAllChapters={isBatchGeneratingChapters}
+          batchGenerationProgress={batchGenerationProgress}
+        />
       )}
 
       {appState === 'chapters' && (
