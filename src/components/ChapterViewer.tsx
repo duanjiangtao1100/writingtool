@@ -72,6 +72,40 @@ export function ChapterViewer({
     window.setTimeout(() => setIsCopied(false), 1500);
   };
 
+  const handleExportAllChapters = () => {
+    if (chapters.length === 0) {
+      return;
+    }
+
+    const sortedChapters = [...chapters].sort((a, b) => a.chapterNumber - b.chapterNumber);
+    const novelTitle = (outlineTitle || '小说').trim() || '小说';
+    const safeTitle = novelTitle.replace(/[\\/:*?"<>|]+/g, '_');
+    const now = new Date();
+    const timestamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`;
+
+    const exportContent = [
+      `标题：${novelTitle}`,
+      `导出时间：${now.toLocaleString()}`,
+      '',
+      ...sortedChapters.flatMap((chapter, index) => [
+        `第${chapter.chapterNumber}章 ${chapter.title || `第${chapter.chapterNumber}章`}`,
+        '',
+        chapter.content,
+        ...(index === sortedChapters.length - 1 ? [] : ['', '--------------------------------------------------', '']),
+      ]),
+    ].join('\n');
+
+    const blob = new Blob(['\uFEFF', exportContent], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${safeTitle}_全部章节_${timestamp}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   const handleEditOrSave = async () => {
     if (!isEditing) {
       setIsEditing(true);
@@ -179,6 +213,19 @@ export function ChapterViewer({
           </h2>
 
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginBottom: '12px' }}>
+            <button
+              onClick={handleExportAllChapters}
+              style={{
+                border: '1px solid #d1d5db',
+                backgroundColor: '#fff',
+                color: '#111827',
+                padding: '6px 12px',
+                borderRadius: '8px',
+                cursor: 'pointer',
+              }}
+            >
+              一键导出
+            </button>
             <button
               onClick={() => {
                 void handleEditOrSave();
