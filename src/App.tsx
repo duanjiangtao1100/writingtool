@@ -7,13 +7,20 @@ import { useLLM } from './hooks/useLLM';
 import { useOutline } from './hooks/useOutline';
 import { useChapters } from './hooks/useChapters';
 import {
+  loadAnalysisDepthMode,
   loadCurrentOutlineId,
+  loadHighOriginalityMode,
   loadLLMConfig,
   loadOutlineChapterCount,
+  loadOutlineGenerationMode,
   loadStyleAnalysis,
+  saveAnalysisDepthMode,
   saveCurrentOutlineId,
+  saveHighOriginalityMode,
+  saveOutlineGenerationMode,
   saveOutlineChapterCount,
   saveStyleAnalysis,
+  type AnalysisDepthMode,
 } from './storage/localStorage';
 import './App.css';
 
@@ -70,6 +77,8 @@ interface StyleAnalysis {
   plotPatternAnalysis: string;
 }
 
+type OutlineGenerationMode = 'faithful' | 'blend' | 'forced';
+
 interface ChapterSection {
   chapterNumber: number;
   heading: string;
@@ -85,15 +94,42 @@ interface PlotChunkAnalysis {
   objectiveNotes: string;
 }
 
+interface AnalysisProgressState {
+  current: number;
+  total: number;
+  message: string;
+  startedAt: number;
+}
+
 type AppState = 'settings' | 'upload' | 'analysis' | 'outline' | 'chapters';
 
 const DEFAULT_OUTLINE_CHAPTER_COUNT = 50;
 const MIN_OUTLINE_CHAPTER_COUNT = 1;
 const MAX_OUTLINE_CHAPTER_COUNT = 50;
-const MIN_DEEP_PLOT_ANALYSIS_CHAPTERS = 200;
-const MAX_DEEP_PLOT_ANALYSIS_CHAPTERS = 300;
+const MIN_DEEP_PLOT_ANALYSIS_CHAPTERS = 100;
+const MAX_DEEP_PLOT_ANALYSIS_CHAPTERS = 100;
 const MAX_PLOT_ANALYSIS_CHUNK_CHAPTERS = 30;
 const MAX_PLOT_ANALYSIS_CHUNK_CHARACTERS = 28000;
+const QUICK_ANALYSIS_MAX_CHAPTERS = 80;
+const QUICK_ANALYSIS_SAMPLE_POINTS = 6;
+
+const OUTLINE_GENERATION_MODE_OPTIONS: Array<{ value: OutlineGenerationMode; label: string; description: string }> = [
+  {
+    value: 'faithful',
+    label: '忠实原作节奏',
+    description: '只仿写原作风格与节奏，故事、人物、设定必须全新，剧情模式分析只作辅助参考。',
+  },
+  {
+    value: 'blend',
+    label: '融合剧情模式分析',
+    description: '在保持全新故事和人物的前提下，适度吸收剧情模式分析里的推进规律和节奏设计。',
+  },
+  {
+    value: 'forced',
+    label: '强制黄金逆袭模式',
+    description: '只借用黄金逆袭的爽点框架，但人物、设定、主线事件仍必须完全原创。',
+  },
+];
 
 function normalizeOutlineChapterCount(value: number): number {
   if (!Number.isFinite(value)) {
@@ -110,8 +146,71 @@ function parseKeyElementsInput(text: string): string[] {
     .filter((item) => item.length > 0);
 }
 
+function buildOutlineModeInstruction(mode: OutlineGenerationMode): string {
+  if (mode === 'forced') {
+    return `大纲生成模式：强制黄金逆袭模式。
+请把 plotPatternAnalysis 视为抽象节奏模板，优先围绕“耻辱 -> 奋斗 -> 打脸”的黄金循环组织整部小说。
+允许为了强化爽点节奏而主动重组题材表达、冲突排序、成长路径与阶段高潮。
+请显式安排：前期受辱、金手指降临、换地图成长、小打脸密集分布、阶段性大打脸、打脸后引出更高层冲突。
+但你只能借用抽象结构，严禁复用原小说的任何具体人物、关系、宗门、世界名、法宝、桥段、事件顺序或一对一角色映射；故事必须彻底原创。`;
+  }
+
+  if (mode === 'blend') {
+    return `大纲生成模式：融合剧情模式分析。
+请以原始风格分析为主，同时吸收 plotPatternAnalysis 中已经验证有效的剧情推进规律。
+可以借鉴其中的主线驱动、冲突节奏、爽点分布和阶段循环，但不要强行把所有题材都改写成单一逆袭爽文。
+如果原文本身不完全符合“耻辱 -> 奋斗 -> 打脸”，请只融合相容部分。
+无论如何，都只允许仿写风格和节奏，不允许沿用原小说的具体人物、阵营、设定名词、核心事件链或章节对应关系；新大纲必须是全新的故事。`;
+  }
+
+  return `大纲生成模式：忠实原作节奏。
+请优先还原上传小说本身的题材气质、叙事结构、冲突密度和节奏分布。
+plotPatternAnalysis 只能作为辅助观察，不得喧宾夺主；如果它与原始风格不一致，请以 styleDescription 和 keyElements 为准。
+不要为了套用固定爽文模板而强行引入“耻辱 -> 奋斗 -> 打脸”循环。
+  注意：忠实的是节奏和气质，不是剧情内容；人物、故事、世界设定、冲突事件必须全部原创，绝不能照抄原小说。`;
+}
+
+function buildHighOriginalityInstruction(enabled: boolean): string {
+  if (!enabled) {
+    return '原创性增强：关闭。仍然必须保证新故事、新人物、新设定，但不额外施加更强的去相似化约束。';
+  }
+
+  return `原创性增强：开启。
+请进一步降低与原小说的相似度，除了不得照抄外，还要主动避开容易形成“换皮感”的对应关系。
+特别要求：
+1. 不要沿用相同类型的开篇羞辱事件、相同类型的金手指载体、相同类型的核心地图推进顺序。
+2. 不要让主角、反派、导师、白月光、垫脚石形成与原小说可一一对照的功能映射。
+3. 不要让前三章的冲突触发逻辑与原小说明显同构；如原作是退婚开局，新作应改为另一类受压迫或失势开局。
+4. 自检世界观、修炼体系、组织结构、关键转折是否过于接近原作；若接近，必须改写。
+5. 宁可保留抽象风格和节奏，也不要保留具体桥段轮廓。`;
+}
+
+function buildOutlineStyleReference(styleAnalysis: StyleAnalysis): string {
+  return [
+    '以下内容仅可用于仿写写作气质、叙事节奏、爽点分布与冲突推进方式。',
+    '禁止把其中任何具体世界名、人名、宗门、法宝、职业、关系、桥段、剧情节点直接搬入新大纲。',
+    '如果剧情模式分析中包含具体设定，它们也只能被抽象理解为“某类设定功能”，不能原样复用。',
+    '',
+    `风格描述：${styleAnalysis.styleDescription}`,
+    `关键元素：${styleAnalysis.keyElements.join('、') || '无'}`,
+    `剧情模式分析（仅抽象参考节奏，不可复用具体内容）：${styleAnalysis.plotPatternAnalysis || '无'}`,
+  ].join('\n');
+}
+
 function sanitizeAnalysisText(text: string, maxLength: number): string {
   return text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, maxLength);
+}
+
+function formatDuration(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  if (minutes <= 0) {
+    return `${seconds}秒`;
+  }
+
+  return `${minutes}分${seconds.toString().padStart(2, '0')}秒`;
 }
 
 function extractChapterSections(content: string): ChapterSection[] {
@@ -201,6 +300,33 @@ function buildStyleAnalysisSample(content: string, chapters: ChapterSection[]): 
   return sampledSections
     .map((section) => sanitizeAnalysisText(section.content, 5000))
     .join('\n\n');
+}
+
+function buildQuickPlotAnalysisSample(content: string, chapters: ChapterSection[]): { sampledChapterCount: number; sampleText: string } {
+  if (chapters.length === 0) {
+    return {
+      sampledChapterCount: 0,
+      sampleText: sanitizeAnalysisText(content, 18000),
+    };
+  }
+
+  const candidateChapters = chapters.slice(0, Math.min(QUICK_ANALYSIS_MAX_CHAPTERS, chapters.length));
+  const selectedSections: ChapterSection[] = [];
+
+  for (let index = 0; index < Math.min(QUICK_ANALYSIS_SAMPLE_POINTS, candidateChapters.length); index++) {
+    const candidateIndex = Math.floor((index * (candidateChapters.length - 1)) / Math.max(1, Math.min(QUICK_ANALYSIS_SAMPLE_POINTS, candidateChapters.length) - 1));
+    const selectedChapter = candidateChapters[candidateIndex];
+    if (!selectedSections.some((item) => item.chapterNumber === selectedChapter.chapterNumber)) {
+      selectedSections.push(selectedChapter);
+    }
+  }
+
+  return {
+    sampledChapterCount: candidateChapters.length,
+    sampleText: selectedSections
+      .map((section) => sanitizeAnalysisText(section.content, 3200))
+      .join('\n\n'),
+  };
 }
 
 function parsePlotChunkAnalysisResponse(response: string): PlotChunkAnalysis {
@@ -508,30 +634,125 @@ const PLOT_CHUNK_ANALYSIS_PROMPT = `你是一位专业的网文剧情编辑，�
   "objectiveNotes": "补充的客观观察"
 }`;
 
-const PLOT_PATTERN_SYNTHESIS_PROMPT = `你是一位专业的网文策划编辑。下面是对一部小说前 {{sampledChapterCount}} 章的分段剧情分析结果。
+const PLOT_PATTERN_SYNTHESIS_PROMPT = `你是一位精通网文创作的大师，请结合下面对小说前 {{sampledChapterCount}} 章的分段剧情分析结果，严格按照以下黄金逆袭剧情模式，生成这部小说可复用的【核心设定/第一章/故事大纲】分析模板。
 
 分段分析：
 {{chunkAnalyses}}
 
-请把这些结果整合为一段更客观的“剧情模式分析”。
+重要要求：
+1. 这是对已分析样本的结构化提炼，不是脱离原文的随意原创。
+2. 结论必须尽量客观，优先依据样本中反复出现的设定、冲突、角色关系与节奏规律。
+3. 如果样本中没有明确证据支撑某一项，请直接写“文本中未明确”或“样本里未充分展开”，不要脑补。
+4. 开头请明确写出“基于前 {{sampledChapterCount}} 章样本提炼”。
+5. 请输出结构化纯文本，保留清晰分段和标题，不要输出 JSON。
+6. 只提炼可迁移的创作框架，不得沿用原文中的具体人名、宗门名、地名、法宝名、血脉名、事件顺序或角色关系；如样本里出现具体元素，也必须抽象成通用功能描述。
+
+你是一位精通网文创作的大师，请严格按照以下黄金逆袭剧情模式，生成一部小说的【核心设定/第一章/故事大纲】。
+
+核心驱动模型：耻辱  奋斗  打脸
+
+一、 世界观与力量体系
+世界名称：【例：斗气大陆】
+
+力量等级：【例：斗者、斗师、大斗师、斗灵、斗王、斗皇、斗宗】需严格分级，清晰明确。
+
+特色设定：【例：异火榜/天鼎榜/本命神器】一种稀有且强大的特殊物品，是主角越级挑战和金手指的核心。
+
+二、 主角设定
+主角名：【】
+
+初始身份：【例：曾经的天才，因故沦为废物/被家族轻视的少年】
+
+核心性格：【例：坚韧、隐忍、重情重义、杀伐果断】
+
+三、 剧情引擎（黄金循环）
+第一步：施加耻辱（制造情绪负债）
+
+羞辱事件：【例：被未婚妻/宗门上门强行退婚；被家族长老公开驱逐；被昔日同伴背叛嘲笑】
+
+羞辱核心：羞辱者必须身份高贵、态度高傲、实力远超主角，且事件要当众发生，践踏主角与家族的尊严。
+
+主角反应：压抑愤怒，立下誓言。【例：三十年河东三十年河西，莫欺少年穷！】
+
+第二步：金手指降临（提供翻盘点）
+
+金手指类型：【例：戒指/玉佩/书籍中的老爷爷灵魂；神秘传承；系统】
+
+金手指能力：需具备导师（提供功法/知识） 与 保镖（提供危机保护） 双重功能。
+
+核心功法/能力：【例：焚决一种可通过吞噬稀有能量（如异火）进化的功法】必须有越阶战斗和成长性特点。
+
+第三步：艰苦奋斗（建立代入感）
+
+修炼路径：需经历 换地图 模式：
+
+新手村：家族内部，解决内部矛盾，初步展现实力。
+野外地图：【例：魔兽山脉/危险森林/大沙漠】进行严酷的生死历练，修炼斗技，磨练心性。
+社会舞台：【例：炼药师大会/宗门大比】在公开场合获得荣誉，积累声望和人脉。
+终极目标地：【例：云岚宗】完成最终打脸。
+具体磨炼：必须描写高强度的身体训练、炼丹/炼器的失败与成功、与魔兽/敌人的生死搏杀，强调主角付出的汗水与代价。
+
+第四步：成功打脸（释放情绪价值）
+
+打脸对象：羞辱主角的【未婚妻/宗门/仇敌】。
+
+打脸方式：在公开场合，以绝对优势击败对手，并说出当年立下的誓言，完成情绪闭环。
+
+后果：打脸后，往往引发更高层次的冲突（如对方宗门长辈出手），为下一阶段剧情做铺垫。
+
+四、 情感与关系线
+白月光（情感动力）：【例：身份神秘的青梅竹马】主角变强的初心之一，背景强大，一直默默支持主角。
+
+垫脚石（目标与耻辱）：【例：退婚未婚妻】主角前期必须击败的对象，她的存在是耻辱的具象化。
+
+红颜知己（伙伴与患难）：【例：共同患难的女伴】与主角有过生死与共的经历，自身带有特殊体质/秘密，为后续剧情提供伏笔。
+
+复杂关系者（戏剧张力）：【例：敌对宗门的宗主，却与主角有过暧昧】身份对立与个人情感的矛盾，增加故事的曲折度。
+
+五、 生成要求
+开篇节奏：必须在第一章或第二章内完成天才废物受辱获得金手指的全过程，迅速抓住读者。
+
+爽点分布：每几章就要有一个小打脸（如测试震惊众人），每隔一个大阶段就要有一个大打脸（如击败强敌）。
+
+语言风格：热血、直接、略带中二但足够燃。
+`;
+
+const QUICK_PLOT_PATTERN_ANALYSIS_PROMPT = `你是一位精通网文创作的大师。下面是从一部小说前 {{sampledChapterCount}} 章中抽取的代表性章节样本。
+
+章节样本：
+{{sampledContent}}
+
+请基于这些样本，快速提炼这部小说的“剧情模式分析”。
 
 要求：
-1. 明确说明这是“基于前 {{sampledChapterCount}} 章样本”的结论；如果样本不足 200 章，也要如实说明基于现有全部章节。
-2. 不要只复述开篇剧情，要总结长线主线、阶段性循环、常见冲突触发方式、升级/反转/高潮分布。
-3. 语气客观，不夸张，不脑补未出现的内容。
-4. 优先使用“剧情链路 + 节奏总结”的表达，但允许比一句话稍展开。
-5. 只输出纯文本，不要 JSON，不要列表。
+1. 这是快速分析，只基于样本概括，不要假装看过全部章节。
+2. 重点总结可迁移的剧情推进规律、冲突触发方式、升级节奏和爽点分布。
+3. 只仿写创作框架，不得复述样本中的具体人名、宗门、地名、法宝或事件。
+4. 开头明确写出“基于前 {{sampledChapterCount}} 章内抽样样本的快速分析”。
+5. 输出结构化纯文本，适合作为后续生成全新大纲的参考模板。
+
+请尽量使用【核心设定/第一章/故事大纲】这种结构化方式来表达，但内容必须是抽象可复用的创作规律，而不是对原文剧情的复刻。
 `;
 
 const OUTLINE_PROMPT = `你是一个专业的网络小说作者。
 参考小说风格：
 {{styleAnalysis}}
 
+模式要求：
+{{outlineModeInstruction}}
+
+原创性要求：
+{{highOriginalityInstruction}}
+
 请基于上述风格，创作一个全新的小说大纲。
 要求：
 1. 总共 {{chapterCount}} 章。
 2. 每章包含 chapterNumber、title、description。
-3. 严格返回 JSON，不要附带解释文字。
+3. 仅仅仿写风格，故事、人物、世界设定、阵营关系、关键冲突、金手指、成长路线都必须是全新的。
+4. 严禁照抄、套改、影射原小说的核心剧情；不得复用原小说的人名、地名、宗门、法宝、名场面、退婚桥段、章节顺序，禁止一对一角色映射和章节映射。
+5. 允许借鉴抽象叙事规律，但最终产物必须让读者一眼看出是“新故事”，而不是原小说换皮版。
+6. 在生成前先自检：如果任何章节简介与原小说存在明显对应关系，请重写后再输出。
+7. 严格返回 JSON，不要附带解释文字。
 
 请输出格式：
 {
@@ -612,11 +833,16 @@ function App() {
     const savedChapterCount = loadOutlineChapterCount();
     return String(normalizeOutlineChapterCount(savedChapterCount ?? DEFAULT_OUTLINE_CHAPTER_COUNT));
   });
+  const [analysisDepthMode, setAnalysisDepthMode] = useState<AnalysisDepthMode>(() => loadAnalysisDepthMode());
+  const [outlineGenerationMode, setOutlineGenerationMode] = useState<OutlineGenerationMode>(() => loadOutlineGenerationMode());
+  const [highOriginalityMode, setHighOriginalityMode] = useState(() => loadHighOriginalityMode());
   const [isEditingAnalysis, setIsEditingAnalysis] = useState(false);
   const [editedStyleDescription, setEditedStyleDescription] = useState('');
   const [editedKeyElements, setEditedKeyElements] = useState('');
   const [editedPlotPatternAnalysis, setEditedPlotPatternAnalysis] = useState('');
   const [isCheckingOutlineContinuity, setIsCheckingOutlineContinuity] = useState(false);
+  const [analysisProgress, setAnalysisProgress] = useState<AnalysisProgressState | null>(null);
+  const [analysisElapsedMs, setAnalysisElapsedMs] = useState(0);
 
   const { isLoading, error, callLLM } = useLLM();
   const { outline, allOutlines, saveOutlineData, setOutline } = useOutline(currentOutlineId || undefined);
@@ -645,6 +871,20 @@ function App() {
     }
   }, [chapters, currentChapterNumber]);
 
+  useEffect(() => {
+    if (!analysisProgress) {
+      setAnalysisElapsedMs(0);
+      return;
+    }
+
+    setAnalysisElapsedMs(Date.now() - analysisProgress.startedAt);
+    const timer = window.setInterval(() => {
+      setAnalysisElapsedMs(Date.now() - analysisProgress.startedAt);
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [analysisProgress]);
+
   const generateOutline = useCallback(async (chapterCount: number, overrideStyleAnalysis?: StyleAnalysis) => {
     const currentStyleAnalysis = overrideStyleAnalysis ?? (styleAnalysis && styleAnalysis.styleDescription ? styleAnalysis : loadStyleAnalysis());
 
@@ -660,8 +900,13 @@ function App() {
 
     try {
       console.log('Generating outline...');
+      const outlineModeInstruction = buildOutlineModeInstruction(outlineGenerationMode);
+      const highOriginalityInstruction = buildHighOriginalityInstruction(highOriginalityMode);
+      const styleReference = buildOutlineStyleReference(currentStyleAnalysis);
       const prompt = OUTLINE_PROMPT
-        .replace('{{styleAnalysis}}', JSON.stringify(currentStyleAnalysis))
+        .replace('{{styleAnalysis}}', styleReference)
+        .replace('{{outlineModeInstruction}}', outlineModeInstruction)
+        .replace('{{highOriginalityInstruction}}', highOriginalityInstruction)
         .replace('{{chapterCount}}', String(chapterCount));
       const response = await callLLM({ config: llmConfig, prompt });
       console.log('LLM response length:', response.length);
@@ -697,7 +942,7 @@ function App() {
       console.error('生成大纲失败:', err);
       alert('生成大纲失败: ' + (err instanceof Error ? err.message : '未知错误'));
     }
-  }, [callLLM, llmConfig, saveOutlineData, setActiveOutlineId, setOutline, styleAnalysis]);
+  }, [callLLM, highOriginalityMode, llmConfig, outlineGenerationMode, saveOutlineData, setActiveOutlineId, setOutline, styleAnalysis]);
 
   const handleNovelUploaded = useCallback(async (content: string) => {
     console.log('handleNovelUploaded called, content length:', content.length);
@@ -709,11 +954,33 @@ function App() {
 
     try {
       console.log('Starting analysis...');
+      const analysisStartedAt = Date.now();
+      setAnalysisProgress({ current: 0, total: 0, message: '正在解析章节结构...', startedAt: analysisStartedAt });
+
       const extractedChapters = extractChapterSections(content);
-      const deepPlotAnalysisChapters = selectChaptersForDeepPlotAnalysis(extractedChapters);
+      const deepPlotAnalysisChapters = analysisDepthMode === 'deep' ? selectChaptersForDeepPlotAnalysis(extractedChapters) : [];
+      const chapterChunks = deepPlotAnalysisChapters.length > 0 ? chunkChaptersForPlotAnalysis(deepPlotAnalysisChapters) : [];
+      const quickPlotSample = buildQuickPlotAnalysisSample(content, extractedChapters);
       const styleSample = buildStyleAnalysisSample(content, deepPlotAnalysisChapters.length > 0 ? deepPlotAnalysisChapters : extractedChapters);
+      const totalAnalysisSteps = analysisDepthMode === 'deep'
+        ? 1 + (chapterChunks.length > 0 ? chapterChunks.length + 1 : 1)
+        : 2;
+
+      setAnalysisProgress({
+        current: 0,
+        total: totalAnalysisSteps,
+        message: analysisDepthMode === 'deep'
+          ? deepPlotAnalysisChapters.length > 0
+            ? `已识别 ${deepPlotAnalysisChapters.length} 章，准备开始深度分析...`
+            : '未识别到稳定章节标题，准备按全文样本分析...'
+          : quickPlotSample.sampledChapterCount > 0
+            ? `已识别 ${quickPlotSample.sampledChapterCount} 章候选样本，准备开始快速分析...`
+            : '未识别到稳定章节标题，准备按全文样本快速分析...',
+        startedAt: analysisStartedAt,
+      });
 
       const stylePrompt = ANALYSIS_PROMPT.replace('{{novelContent}}', styleSample);
+      setAnalysisProgress({ current: 0, total: totalAnalysisSteps, message: `步骤 1/${totalAnalysisSteps}：正在分析写作风格...`, startedAt: analysisStartedAt });
       console.log('Calling LLM for style analysis...');
       const styleResponse = await callLLM({ config: llmConfig, prompt: stylePrompt });
       console.log('Style analysis response:', styleResponse);
@@ -732,17 +999,22 @@ function App() {
 
       let plotPatternAnalysis = '';
 
-      if (deepPlotAnalysisChapters.length > 0) {
-        const chapterChunks = chunkChaptersForPlotAnalysis(deepPlotAnalysisChapters);
+      if (analysisDepthMode === 'deep' && deepPlotAnalysisChapters.length > 0) {
         const chunkAnalyses: PlotChunkAnalysis[] = [];
 
-        for (const chunk of chapterChunks) {
+        for (const [index, chunk] of chapterChunks.entries()) {
           const chapterRange = `第${chunk[0].chapterNumber}-${chunk[chunk.length - 1].chapterNumber}章`;
+          setAnalysisProgress({
+            current: 1 + index,
+            total: totalAnalysisSteps,
+            message: `步骤 ${2 + index}/${totalAnalysisSteps}：正在分析 ${chapterRange} 的剧情节奏...`,
+            startedAt: analysisStartedAt,
+          });
           const plotChunkPrompt = PLOT_CHUNK_ANALYSIS_PROMPT
             .replace('{{chapterRange}}', chapterRange)
             .replace('{{chapterContent}}', formatChapterChunk(chunk));
 
-          const chunkResponse = await callLLM({ config: llmConfig, prompt: plotChunkPrompt });
+          const chunkResponse = await callLLM({ config: llmConfig, prompt: plotChunkPrompt, deepThinking: true });
           chunkAnalyses.push(parsePlotChunkAnalysisResponse(chunkResponse));
         }
 
@@ -750,7 +1022,25 @@ function App() {
           .replaceAll('{{sampledChapterCount}}', String(deepPlotAnalysisChapters.length))
           .replace('{{chunkAnalyses}}', JSON.stringify(chunkAnalyses, null, 2));
 
-        plotPatternAnalysis = (await callLLM({ config: llmConfig, prompt: synthesisPrompt })).trim();
+        setAnalysisProgress({
+          current: 1 + chapterChunks.length,
+          total: totalAnalysisSteps,
+          message: `步骤 ${totalAnalysisSteps}/${totalAnalysisSteps}：正在汇总整体剧情模式...`,
+          startedAt: analysisStartedAt,
+        });
+        plotPatternAnalysis = (await callLLM({ config: llmConfig, prompt: synthesisPrompt, deepThinking: true })).trim();
+      } else if (analysisDepthMode === 'quick') {
+        const quickPrompt = QUICK_PLOT_PATTERN_ANALYSIS_PROMPT
+          .replaceAll('{{sampledChapterCount}}', String(quickPlotSample.sampledChapterCount))
+          .replace('{{sampledContent}}', quickPlotSample.sampleText || sanitizeAnalysisText(content, 18000));
+
+        setAnalysisProgress({
+          current: 1,
+          total: totalAnalysisSteps,
+          message: `步骤 2/${totalAnalysisSteps}：正在生成快速剧情模式分析...`,
+          startedAt: analysisStartedAt,
+        });
+        plotPatternAnalysis = (await callLLM({ config: llmConfig, prompt: quickPrompt })).trim();
       } else {
         const fallbackPrompt = PLOT_PATTERN_SYNTHESIS_PROMPT
           .replaceAll('{{sampledChapterCount}}', '0')
@@ -765,7 +1055,13 @@ function App() {
             },
           ], null, 2));
 
-        plotPatternAnalysis = (await callLLM({ config: llmConfig, prompt: fallbackPrompt })).trim();
+        setAnalysisProgress({
+          current: 1,
+          total: totalAnalysisSteps,
+          message: `步骤 ${totalAnalysisSteps}/${totalAnalysisSteps}：正在生成剧情模式总结...`,
+          startedAt: analysisStartedAt,
+        });
+        plotPatternAnalysis = (await callLLM({ config: llmConfig, prompt: fallbackPrompt, deepThinking: true })).trim();
       }
 
       const analysis: StyleAnalysis = {
@@ -773,6 +1069,7 @@ function App() {
         plotPatternAnalysis,
       };
 
+      setAnalysisProgress({ current: totalAnalysisSteps, total: totalAnalysisSteps, message: '分析完成，正在保存结果...', startedAt: analysisStartedAt });
       saveStyleAnalysis(analysis);
       console.log('Saved to localStorage');
       setStyleAnalysis(analysis);
@@ -783,8 +1080,10 @@ function App() {
     } catch (err) {
       console.error('分析失败:', err);
       alert('分析失败: ' + (err instanceof Error ? err.message : '未知错误'));
+    } finally {
+      setAnalysisProgress(null);
     }
-  }, [callLLM, llmConfig]);
+  }, [analysisDepthMode, callLLM, llmConfig]);
 
   const handleGenerateChapter = useCallback(async (chapterIndex: number) => {
     const currentStyleAnalysis = styleAnalysis && styleAnalysis.styleDescription ? styleAnalysis : loadStyleAnalysis();
@@ -972,7 +1271,41 @@ function App() {
         </div>
       )}
 
-      {isLoading && (
+      {analysisProgress ? (
+        <div style={{ padding: '12px', backgroundColor: '#ecfeff', borderBottom: '1px solid #bae6fd' }}>
+          <div style={{ fontWeight: 600, color: '#0f172a' }}>{analysisProgress.message}</div>
+          <div style={{ marginTop: '8px', height: '8px', backgroundColor: '#cffafe', borderRadius: '999px', overflow: 'hidden' }}>
+            <div
+              style={{
+                width: `${analysisProgress.total > 0 ? Math.max(6, Math.round((analysisProgress.current / analysisProgress.total) * 100)) : 6}%`,
+                height: '100%',
+                backgroundColor: '#06b6d4',
+                transition: 'width 0.25s ease',
+              }}
+            />
+          </div>
+          <div style={{ marginTop: '6px', fontSize: '12px', color: '#155e75' }}>
+            {analysisProgress.total > 0
+              ? `${Math.min(analysisProgress.current, analysisProgress.total)}/${analysisProgress.total} 步`
+              : '准备中'}
+          </div>
+          <div style={{ marginTop: '4px', fontSize: '12px', color: '#155e75' }}>
+            已耗时：{formatDuration(analysisElapsedMs)}
+            {analysisProgress.total > 0 && analysisProgress.current > 0 && analysisProgress.current < analysisProgress.total && (
+              <>
+                {' · '}预计剩余：{
+                  formatDuration(
+                    Math.max(
+                      0,
+                      (analysisElapsedMs / Math.max(1, analysisProgress.current)) * (analysisProgress.total - analysisProgress.current),
+                    ),
+                  )
+                }
+              </>
+            )}
+          </div>
+        </div>
+      ) : isLoading && (
         <div style={{ padding: '10px', backgroundColor: '#efe' }}>
           处理中...
         </div>
@@ -980,7 +1313,16 @@ function App() {
 
       {appState === 'settings' && <SettingsForm onConfigSaved={handleConfigSaved} />}
 
-      {appState === 'upload' && <NovelUploader onNovelUploaded={handleNovelUploaded} />}
+      {appState === 'upload' && (
+        <NovelUploader
+          onNovelUploaded={handleNovelUploaded}
+          analysisDepthMode={analysisDepthMode}
+          onAnalysisDepthModeChange={(mode) => {
+            setAnalysisDepthMode(mode);
+            saveAnalysisDepthMode(mode);
+          }}
+        />
+      )}
 
       {appState === 'analysis' && (
         <div style={{ padding: '20px' }}>
@@ -1022,11 +1364,73 @@ function App() {
                   <textarea
                     value={editedPlotPatternAnalysis}
                     onChange={(e) => setEditedPlotPatternAnalysis(e.target.value)}
-                    style={{ width: '100%', minHeight: '80px', padding: '8px' }}
+                    style={{ width: '100%', minHeight: '260px', padding: '8px' }}
                   />
                 ) : (
-                  <p>{savedAnalysis.plotPatternAnalysis || '暂无剧情模式分析结果'}</p>
+                  <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.8 }}>
+                    {savedAnalysis.plotPatternAnalysis || '暂无剧情模式分析结果'}
+                  </div>
                 )}
+              </div>
+              <div style={{ marginBottom: '20px' }}>
+                <h3>大纲生成模式</h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  {OUTLINE_GENERATION_MODE_OPTIONS.map((option) => (
+                    <label
+                      key={option.value}
+                      style={{
+                        display: 'block',
+                        border: '1px solid #e5e7eb',
+                        borderRadius: '10px',
+                        padding: '12px',
+                        backgroundColor: outlineGenerationMode === option.value ? '#eff6ff' : '#fff',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <input
+                        type="radio"
+                        name="outline-generation-mode"
+                        value={option.value}
+                        checked={outlineGenerationMode === option.value}
+                        onChange={() => {
+                          setOutlineGenerationMode(option.value);
+                          saveOutlineGenerationMode(option.value);
+                        }}
+                        style={{ marginRight: '8px' }}
+                      />
+                      <strong>{option.label}</strong>
+                      <div style={{ marginTop: '6px', color: '#4b5563', lineHeight: 1.6 }}>{option.description}</div>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div style={{ marginBottom: '20px' }}>
+                <h3>原创性更强</h3>
+                <label
+                  style={{
+                    display: 'block',
+                    border: '1px solid #e5e7eb',
+                    borderRadius: '10px',
+                    padding: '12px',
+                    backgroundColor: highOriginalityMode ? '#f0fdf4' : '#fff',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={highOriginalityMode}
+                    onChange={(e) => {
+                      const nextValue = e.target.checked;
+                      setHighOriginalityMode(nextValue);
+                      saveHighOriginalityMode(nextValue);
+                    }}
+                    style={{ marginRight: '8px' }}
+                  />
+                  <strong>启用更强去相似化约束（默认开启）</strong>
+                  <div style={{ marginTop: '6px', color: '#4b5563', lineHeight: 1.6 }}>
+                    会额外避免与原小说在开篇冲突、角色功能映射、金手指载体、地图推进顺序上的明显同构，减少“换皮感”。
+                  </div>
+                </label>
               </div>
               <div style={{ marginBottom: '20px' }}>
                 {isEditingAnalysis ? (

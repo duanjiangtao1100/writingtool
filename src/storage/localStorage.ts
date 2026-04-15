@@ -16,6 +16,12 @@ const LLM_CONFIG_KEY = 'llm-config';
 const STYLE_ANALYSIS_KEY = 'style-analysis';
 const CURRENT_OUTLINE_ID_KEY = 'current-outline-id';
 const OUTLINE_CHAPTER_COUNT_KEY = 'outline-chapter-count';
+const OUTLINE_GENERATION_MODE_KEY = 'outline-generation-mode';
+const HIGH_ORIGINALITY_MODE_KEY = 'high-originality-mode';
+const ANALYSIS_DEPTH_MODE_KEY = 'analysis-depth-mode';
+
+export type OutlineGenerationMode = 'faithful' | 'blend' | 'forced';
+export type AnalysisDepthMode = 'quick' | 'deep';
 
 export function saveLLMConfig(config: LLMConfig): void {
   localStorage.setItem(LLM_CONFIG_KEY, JSON.stringify(config));
@@ -83,4 +89,43 @@ export function loadOutlineChapterCount(): number | null {
   }
 
   return chapterCount;
+}
+
+export function saveOutlineGenerationMode(mode: OutlineGenerationMode): void {
+  localStorage.setItem(OUTLINE_GENERATION_MODE_KEY, mode);
+}
+
+export function loadOutlineGenerationMode(): OutlineGenerationMode {
+  const value = localStorage.getItem(OUTLINE_GENERATION_MODE_KEY);
+  if (value === 'blend' || value === 'forced') {
+    return value;
+  }
+
+  return 'faithful';
+}
+
+export function saveHighOriginalityMode(enabled: boolean): void {
+  localStorage.setItem(HIGH_ORIGINALITY_MODE_KEY, String(enabled));
+}
+
+export function loadHighOriginalityMode(): boolean {
+  const value = localStorage.getItem(HIGH_ORIGINALITY_MODE_KEY);
+  if (value === null) {
+    return true;
+  }
+
+  return value === 'true';
+}
+
+export function saveAnalysisDepthMode(mode: AnalysisDepthMode): void {
+  localStorage.setItem(ANALYSIS_DEPTH_MODE_KEY, mode);
+}
+
+export function loadAnalysisDepthMode(): AnalysisDepthMode {
+  const value = localStorage.getItem(ANALYSIS_DEPTH_MODE_KEY);
+  if (value === 'deep') {
+    return value;
+  }
+
+  return 'quick';
 }

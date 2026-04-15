@@ -12,13 +12,14 @@ interface LLMConfig {
 interface LLMCallOptions {
   config: LLMConfig;
   prompt: string;
+  deepThinking?: boolean;
 }
 
 export function useLLM() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const callLLM = async ({ config, prompt }: LLMCallOptions): Promise<string> => {
+  const callLLM = async ({ config, prompt, deepThinking = false }: LLMCallOptions): Promise<string> => {
     setIsLoading(true);
     setError(null);
 
@@ -36,22 +37,50 @@ export function useLLM() {
         }
       }
 
-      console.log('Calling API:', apiUrl);
+      console.log('Calling API:', apiUrl, 'deepThinking:', deepThinking);
 
-      const response = await fetch(apiUrl, {
+      const headers = {
+        'Content-Type': 'application/json',
+        'Authorization': authHeader,
+      };
+
+      const messages = deepThinking
+        ? [
+            { role: 'system', content: '这是一个需要深度思考的任务。请先充分分析，再给出结构完整、质量优先的最终答案。' },
+            { role: 'user', content: prompt },
+          ]
+        : [
+            { role: 'user', content: prompt },
+          ];
+
+      const basePayload = {
+        model: config.model,
+        messages,
+        stream: false,
+      };
+
+      const requestPayload = deepThinking
+        ? {
+            ...basePayload,
+            reasoning_effort: 'high',
+          }
+        : basePayload;
+
+      let response = await fetch(apiUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': authHeader,
-        },
-        body: JSON.stringify({
-          model: config.model,
-          messages: [
-            { role: 'user', content: prompt }
-          ],
-          stream: false, // 先禁用流式输出，简化调试
-        }),
+        headers,
+        body: JSON.stringify(requestPayload),
       });
+
+      if (!response.ok && deepThinking && response.status === 400) {
+        const errorText = await response.text();
+        console.warn('Deep thinking payload rejected, retrying without reasoning_effort:', errorText);
+        response = await fetch(apiUrl, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(basePayload),
+        });
+      }
 
       if (!response.ok) {
         const errorText = await response.text();
