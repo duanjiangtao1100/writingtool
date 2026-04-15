@@ -8,6 +8,7 @@ import { useOutline } from './hooks/useOutline';
 import { useChapters } from './hooks/useChapters';
 import {
   loadAnalysisDepthMode,
+  loadOutlineAnchorCount,
   loadCurrentOutlineId,
   loadHighOriginalityMode,
   loadLLMConfig,
@@ -17,10 +18,12 @@ import {
   saveAnalysisDepthMode,
   saveCurrentOutlineId,
   saveHighOriginalityMode,
+  saveOutlineAnchorCount,
   saveOutlineGenerationMode,
   saveOutlineChapterCount,
   saveStyleAnalysis,
   type AnalysisDepthMode,
+  type OutlineAnchorCount,
 } from './storage/localStorage';
 import './App.css';
 
@@ -59,6 +62,7 @@ interface OutlineContinuityCheck {
   overallVerdict: string;
   summary: string;
   issues: ContinuityIssue[];
+  usedFallback?: boolean;
 }
 
 interface NovelOutline {
@@ -105,7 +109,10 @@ type AppState = 'settings' | 'upload' | 'analysis' | 'outline' | 'chapters';
 
 const DEFAULT_OUTLINE_CHAPTER_COUNT = 50;
 const MIN_OUTLINE_CHAPTER_COUNT = 1;
-const MAX_OUTLINE_CHAPTER_COUNT = 50;
+const MAX_OUTLINE_CHAPTER_COUNT = 150;
+const OUTLINE_BATCH_CHAPTER_LIMIT = 25;
+const OUTLINE_RECENT_BATCH_WINDOW = 2;
+const DEFAULT_OUTLINE_ANCHOR_COUNT: OutlineAnchorCount = 8;
 const MIN_DEEP_PLOT_ANALYSIS_CHAPTERS = 100;
 const MAX_DEEP_PLOT_ANALYSIS_CHAPTERS = 100;
 const MAX_PLOT_ANALYSIS_CHUNK_CHAPTERS = 30;
@@ -137,6 +144,159 @@ function normalizeOutlineChapterCount(value: number): number {
   }
 
   return Math.min(MAX_OUTLINE_CHAPTER_COUNT, Math.max(MIN_OUTLINE_CHAPTER_COUNT, Math.floor(value)));
+}
+
+function buildOutlineBatchRanges(chapterCount: number): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+
+  for (let start = 1; start <= chapterCount; start += OUTLINE_BATCH_CHAPTER_LIMIT) {
+    ranges.push({
+      start,
+      end: Math.min(chapterCount, start + OUTLINE_BATCH_CHAPTER_LIMIT - 1),
+    });
+  }
+
+  return ranges;
+}
+
+function compactOutlineText(text: string, maxLength = 80): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxLength).trimEnd()}...`;
+}
+
+const OUTLINE_ANCHOR_COUNT_OPTIONS: Array<{ value: OutlineAnchorCount; label: string; description: string }> = [
+  { value: 6, label: '精简（6个锚点）', description: '上下文更短，适合更快生成。' },
+  { value: 8, label: '标准（8个锚点）', description: '连贯性和上下文长度更平衡。' },
+  { value: 10, label: '增强（10个锚点）', description: '保留更多长线记忆，适合更长篇的大纲。' },
+];
+
+function selectOutlineAnchorChapters(chapters: OutlineItem[], maxAnchors = DEFAULT_OUTLINE_ANCHOR_COUNT): OutlineItem[] {
+  if (chapters.length <= maxAnchors) {
+    return chapters;
+  }
+
+  const indexes = new Set<number>();
+  for (let index = 0; index < maxAnchors; index++) {
+    indexes.add(Math.floor((index * (chapters.length - 1)) / Math.max(1, maxAnchors - 1)));
+  }
+
+  return Array.from(indexes)
+    .sort((left, right) => left - right)
+    .map((index) => chapters[index]);
+}
+
+function buildOutlineGlobalMemory(title: string, chapters: OutlineItem[], anchorCount: OutlineAnchorCount): string {
+  if (chapters.length === 0) {
+    return '暂无已生成大纲。这是第一批，请先确定小说标题、核心主线、主要人物关系与前期冲突升级路径。';
+  }
+
+  const anchorChapters = selectOutlineAnchorChapters(chapters, anchorCount);
+  const recentTail = chapters.slice(-Math.min(3, chapters.length));
+
+  return [
+    `已确定小说标题：${title || '待定'}`,
+    `已生成 ${chapters.length} 章。以下是覆盖全局故事推进的关键记忆锚点，请后续批次严格承接，不得重写已有章节。`,
+    '全局关键锚点：',
+    ...anchorChapters.map((chapter) => `第${chapter.chapterNumber}章｜${compactOutlineText(chapter.title, 32)}｜${compactOutlineText(chapter.description, 88)}`),
+    '最近阶段状态：',
+    ...recentTail.map((chapter) => `第${chapter.chapterNumber}章｜${compactOutlineText(chapter.title, 32)}｜${compactOutlineText(chapter.description, 88)}`),
+  ].join('\n');
+}
+
+function buildRecentOutlineContext(chapters: OutlineItem[]): string {
+  if (chapters.length === 0) {
+    return '当前还没有最近批次大纲可供参考。';
+  }
+
+  const recentChapters = chapters.slice(-(OUTLINE_BATCH_CHAPTER_LIMIT * OUTLINE_RECENT_BATCH_WINDOW));
+  return [
+    `最近两批大纲范围：第${recentChapters[0].chapterNumber}-${recentChapters[recentChapters.length - 1].chapterNumber}章。`,
+    ...recentChapters.map((chapter) => `第${chapter.chapterNumber}章｜${compactOutlineText(chapter.title, 32)}｜${compactOutlineText(chapter.description, 88)}`),
+  ].join('\n');
+}
+
+function buildOutlineChapterNumbers(batchStart: number, batchEnd: number): number[] {
+  return Array.from({ length: Math.max(0, batchEnd - batchStart + 1) }, (_, index) => batchStart + index);
+}
+
+function buildCurrentBatchContext(chapters: OutlineItem[]): string {
+  if (chapters.length === 0) {
+    return '当前批次暂未生成任何章节。';
+  }
+
+  return chapters
+    .map((chapter) => `第${chapter.chapterNumber}章｜${compactOutlineText(chapter.title, 32)}｜${compactOutlineText(chapter.description, 88)}`)
+    .join('\n');
+}
+
+function normalizeOutlineChaptersByNumbers(
+  outlineData: { title: string; chapters: OutlineItem[] },
+  chapterNumbers: number[],
+): { title: string; chapters: OutlineItem[] } {
+  const expectedChapterNumberSet = new Set(chapterNumbers);
+  const chaptersByNumber = new Map<number, OutlineItem>();
+  const fallbackChapters: OutlineItem[] = [];
+
+  for (const chapter of outlineData.chapters) {
+    const rawChapterNumber = typeof chapter.chapterNumber === 'number' ? Math.floor(chapter.chapterNumber) : null;
+
+    if (rawChapterNumber !== null && expectedChapterNumberSet.has(rawChapterNumber)) {
+      if (!chaptersByNumber.has(rawChapterNumber)) {
+        chaptersByNumber.set(rawChapterNumber, {
+          id: String(rawChapterNumber),
+          chapterNumber: rawChapterNumber,
+          title: chapter.title?.trim() || `第${rawChapterNumber}章`,
+          description: chapter.description?.trim() || '',
+        });
+      }
+      continue;
+    }
+
+    fallbackChapters.push(chapter);
+  }
+
+  const normalizedChapters = chapterNumbers.flatMap((chapterNumber) => {
+    const matchedChapter = chaptersByNumber.get(chapterNumber);
+    if (matchedChapter) {
+      return [matchedChapter];
+    }
+
+    const fallbackChapter = fallbackChapters.shift();
+    if (!fallbackChapter) {
+      return [];
+    }
+
+    return [{
+      id: String(chapterNumber),
+      chapterNumber,
+      title: fallbackChapter.title?.trim() || `第${chapterNumber}章`,
+      description: fallbackChapter.description?.trim() || '',
+    }];
+  });
+
+  return {
+    title: outlineData.title?.trim() || 'New Novel',
+    chapters: normalizedChapters,
+  };
+}
+
+function normalizeOutlineBatchResponse(
+  outlineData: { title: string; chapters: OutlineItem[] },
+  batchStart: number,
+  batchEnd: number,
+): { title: string; chapters: OutlineItem[] } {
+  const expectedChapterNumbers = buildOutlineChapterNumbers(batchStart, batchEnd);
+  const normalized = normalizeOutlineChaptersByNumbers(outlineData, expectedChapterNumbers);
+
+  if (normalized.chapters.length !== expectedChapterNumbers.length) {
+    throw new Error(`批次大纲章节数不足：期望 ${expectedChapterNumbers.length} 章，实际 ${normalized.chapters.length} 章`);
+  }
+
+  return normalized;
 }
 
 function parseKeyElementsInput(text: string): string[] {
@@ -521,11 +681,86 @@ function normalizeContinuitySeverity(value: unknown): ContinuityIssue['severity'
   return 'medium';
 }
 
+function decodeEscapedJsonText(value: string): string {
+  return value
+    .replace(/\\"/g, '"')
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '')
+    .replace(/\\t/g, '\t')
+    .trim();
+}
+
+function extractQuotedField(text: string, fieldNames: string[]): string {
+  for (const fieldName of fieldNames) {
+    const pattern = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`);
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      return decodeEscapedJsonText(match[1]);
+    }
+  }
+
+  return '';
+}
+
+function salvageOutlineContinuityCheckResponse(response: string): OutlineContinuityCheck {
+  const cleaned = response
+    .replace(/^```(?:json|JSON)?\s*/gm, '')
+    .replace(/```\s*$/gm, '');
+
+  const overallVerdict = extractQuotedField(cleaned, ['overallVerdict', 'verdict', 'overallAssessment', '总体判断']) || '已完成检查';
+  const summary = extractQuotedField(cleaned, ['summary', 'conclusion', '总结']);
+  const objectPattern = /\{[\s\S]*?\}/g;
+  const issues: ContinuityIssue[] = [];
+
+  for (const match of cleaned.matchAll(objectPattern)) {
+    const snippet = match[0];
+    const problem = extractQuotedField(snippet, ['problem', 'issue', 'description']);
+    const impact = extractQuotedField(snippet, ['impact', 'risk']);
+    const suggestion = extractQuotedField(snippet, ['suggestion', 'recommendation', 'fix']);
+
+    if (!problem && !impact && !suggestion) {
+      continue;
+    }
+
+    const chapterRange =
+      extractQuotedField(snippet, ['chapterRange', 'chapter'])
+      || (() => {
+        const chapterNumberMatch = snippet.match(/"chapterNumber"\s*:\s*(\d+)/);
+        return chapterNumberMatch?.[1] ? `第${chapterNumberMatch[1]}章` : '待定位章节';
+      })();
+
+    const severityValue = extractQuotedField(snippet, ['severity']);
+    issues.push({
+      id: String(issues.length + 1),
+      chapterRange,
+      severity: normalizeContinuitySeverity(severityValue),
+      problem,
+      impact,
+      suggestion,
+    });
+  }
+
+  return {
+    checkedAt: Date.now(),
+    overallVerdict,
+    summary,
+    issues,
+    usedFallback: true,
+  };
+}
+
 function parseOutlineContinuityCheckResponse(response: string): OutlineContinuityCheck {
-  const parsed = extractAndParseJSON(response);
+  let parsed: any;
+
+  try {
+    parsed = extractAndParseJSON(response);
+  } catch (error) {
+    console.warn('Continuity check JSON parse failed, attempting salvage parse:', error);
+    return salvageOutlineContinuityCheckResponse(response);
+  }
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('Continuity check response is not a JSON object');
+    return salvageOutlineContinuityCheckResponse(response);
   }
 
   const rawIssues = Array.isArray(parsed.issues)
@@ -594,6 +829,7 @@ function parseOutlineContinuityCheckResponse(response: string): OutlineContinuit
                 : '',
       }))
       .filter((issue) => issue.problem || issue.impact || issue.suggestion),
+    usedFallback: false,
   };
 }
 
@@ -734,7 +970,7 @@ const QUICK_PLOT_PATTERN_ANALYSIS_PROMPT = `你是一位精通网文创作的大
 请尽量使用【核心设定/第一章/故事大纲】这种结构化方式来表达，但内容必须是抽象可复用的创作规律，而不是对原文剧情的复刻。
 `;
 
-const OUTLINE_PROMPT = `你是一个专业的网络小说作者。
+const OUTLINE_BATCH_PROMPT = `你是一个专业的网络小说作者。
 参考小说风格：
 {{styleAnalysis}}
 
@@ -744,15 +980,27 @@ const OUTLINE_PROMPT = `你是一个专业的网络小说作者。
 原创性要求：
 {{highOriginalityInstruction}}
 
-请基于上述风格，创作一个全新的小说大纲。
+当前任务：按批次生成全新小说大纲，以减少上下文长度压力。
+整部小说总计 {{chapterCount}} 章。
+本次只生成第 {{batchStartChapter}}-{{batchEndChapter}} 章，共 {{batchChapterCount}} 章。
+
+全局故事记忆：
+{{globalStoryMemory}}
+
+最近两批大纲：
+{{recentOutlineContext}}
+
 要求：
-1. 总共 {{chapterCount}} 章。
-2. 每章包含 chapterNumber、title、description。
-3. 仅仅仿写风格，故事、人物、世界设定、阵营关系、关键冲突、金手指、成长路线都必须是全新的。
-4. 严禁照抄、套改、影射原小说的核心剧情；不得复用原小说的人名、地名、宗门、法宝、名场面、退婚桥段、章节顺序，禁止一对一角色映射和章节映射。
-5. 允许借鉴抽象叙事规律，但最终产物必须让读者一眼看出是“新故事”，而不是原小说换皮版。
-6. 在生成前先自检：如果任何章节简介与原小说存在明显对应关系，请重写后再输出。
-7. 严格返回 JSON，不要附带解释文字。
+1. 只输出本批次章节，不要重复输出前面已经生成过的章节。
+2. 如果这不是第一批，必须同时参考全局故事记忆和最近两批大纲，保证人物目标、冲突升级、伏笔、设定与节奏自然衔接。
+3. 本批次必须恰好输出 {{batchChapterCount}} 章，chapterNumber 覆盖第 {{batchStartChapter}}-{{batchEndChapter}} 章且顺序连续。
+4. 每章包含 chapterNumber、title、description。
+5. 仅仅仿写风格，故事、人物、世界设定、阵营关系、关键冲突、金手指、成长路线都必须是全新的。
+6. 严禁照抄、套改、影射原小说的核心剧情；不得复用原小说的人名、地名、宗门、法宝、名场面、退婚桥段、章节顺序，禁止一对一角色映射和章节映射。
+7. 允许借鉴抽象叙事规律，但最终产物必须让读者一眼看出是“新故事”，而不是原小说换皮版。
+8. 在生成前先自检：如果任何章节简介与原小说存在明显对应关系，请重写后再输出。
+9. 如果这不是第一批，小说标题必须与前文保持一致，不得改名。
+10. 严格返回 JSON，不要附带解释文字。
 
 请输出格式：
 {
@@ -762,6 +1010,51 @@ const OUTLINE_PROMPT = `你是一个专业的网络小说作者。
       "chapterNumber": 1,
       "title": "第一章标题",
       "description": "第一章简介"
+    }
+  ]
+}`;
+
+const OUTLINE_BATCH_SUPPLEMENT_PROMPT = `你是一个专业的网络小说作者。
+参考小说风格：
+{{styleAnalysis}}
+
+模式要求：
+{{outlineModeInstruction}}
+
+原创性要求：
+{{highOriginalityInstruction}}
+
+当前任务：补齐某一批次大纲中缺失的章节。
+整部小说总计 {{chapterCount}} 章。
+当前批次范围：第 {{batchStartChapter}}-{{batchEndChapter}} 章。
+当前批次已经生成的章节：
+{{currentBatchContext}}
+
+全局故事记忆：
+{{globalStoryMemory}}
+
+最近两批大纲：
+{{recentOutlineContext}}
+
+现在只需要补齐这些缺失章节：{{missingChapterNumbers}}。
+共 {{missingChapterCount}} 章。
+
+要求：
+1. 只输出缺失章节，不要重复输出已生成章节。
+2. chapterNumber 必须严格对应 {{missingChapterNumbers}}，顺序连续，不得缺漏。
+3. 必须严格承接全局故事记忆、最近两批大纲和本批次已生成章节，保证人物状态、冲突推进、伏笔与节奏自然衔接。
+4. 每章包含 chapterNumber、title、description。
+5. 小说标题必须与前文保持一致，不得改名。
+6. 严格返回合法 JSON，不要附带解释文字、备注、Markdown 代码块或任何多余前后缀。
+
+请输出格式：
+{
+  "title": "小说标题",
+  "chapters": [
+    {
+      "chapterNumber": 1,
+      "title": "章节标题",
+      "description": "章节简介"
     }
   ]
 }`;
@@ -834,6 +1127,7 @@ function App() {
     return String(normalizeOutlineChapterCount(savedChapterCount ?? DEFAULT_OUTLINE_CHAPTER_COUNT));
   });
   const [analysisDepthMode, setAnalysisDepthMode] = useState<AnalysisDepthMode>(() => loadAnalysisDepthMode());
+  const [outlineAnchorCount, setOutlineAnchorCount] = useState<OutlineAnchorCount>(() => loadOutlineAnchorCount());
   const [outlineGenerationMode, setOutlineGenerationMode] = useState<OutlineGenerationMode>(() => loadOutlineGenerationMode());
   const [highOriginalityMode, setHighOriginalityMode] = useState(() => loadHighOriginalityMode());
   const [isEditingAnalysis, setIsEditingAnalysis] = useState(false);
@@ -843,6 +1137,7 @@ function App() {
   const [isCheckingOutlineContinuity, setIsCheckingOutlineContinuity] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState<AnalysisProgressState | null>(null);
   const [analysisElapsedMs, setAnalysisElapsedMs] = useState(0);
+  const [isGeneratingOutline, setIsGeneratingOutline] = useState(false);
 
   const { isLoading, error, callLLM } = useLLM();
   const { outline, allOutlines, saveOutlineData, setOutline } = useOutline(currentOutlineId || undefined);
@@ -898,37 +1193,156 @@ function App() {
       return;
     }
 
+    setIsGeneratingOutline(true);
+
     try {
-      console.log('Generating outline...');
+      console.log('Generating outline in batches...');
       const outlineModeInstruction = buildOutlineModeInstruction(outlineGenerationMode);
       const highOriginalityInstruction = buildHighOriginalityInstruction(highOriginalityMode);
       const styleReference = buildOutlineStyleReference(currentStyleAnalysis);
-      const prompt = OUTLINE_PROMPT
-        .replace('{{styleAnalysis}}', styleReference)
-        .replace('{{outlineModeInstruction}}', outlineModeInstruction)
-        .replace('{{highOriginalityInstruction}}', highOriginalityInstruction)
-        .replace('{{chapterCount}}', String(chapterCount));
-      const response = await callLLM({ config: llmConfig, prompt });
-      console.log('LLM response length:', response.length);
-      console.log('=== FULL LLM RESPONSE START ===');
-      console.log(response);
-      console.log('=== FULL LLM RESPONSE END ===');
+      const batchRanges = buildOutlineBatchRanges(chapterCount);
+      const outlineStartedAt = Date.now();
+      const mergedChapters: OutlineItem[] = [];
+      let outlineTitle = '';
 
-      let outlineData: { title: string; chapters: OutlineItem[] };
+      setAnalysisProgress({
+        current: 0,
+        total: batchRanges.length,
+        message: `准备分 ${batchRanges.length} 批生成大纲，每批最多 ${OUTLINE_BATCH_CHAPTER_LIMIT} 章...`,
+        startedAt: outlineStartedAt,
+      });
 
-      try {
-        outlineData = parseOutlineResponse(response);
-      } catch (parseError) {
-        console.warn('Full outline JSON parse failed, attempting salvage parse:', parseError);
-        outlineData = salvageOutlineResponse(response);
-        console.log('Salvaged outline chapters:', outlineData.chapters.length);
+      for (const [batchIndex, batchRange] of batchRanges.entries()) {
+        const batchChapterCount = batchRange.end - batchRange.start + 1;
+        const expectedBatchChapterNumbers = buildOutlineChapterNumbers(batchRange.start, batchRange.end);
+        setAnalysisProgress({
+          current: batchIndex,
+          total: batchRanges.length,
+          message: `步骤 ${batchIndex + 1}/${batchRanges.length}：正在生成第 ${batchRange.start}-${batchRange.end} 章大纲...`,
+          startedAt: outlineStartedAt,
+        });
+
+        let normalizedBatch: { title: string; chapters: OutlineItem[] } | null = null;
+        let lastBatchError: unknown = null;
+
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            if (attempt > 1) {
+              setAnalysisProgress({
+                current: batchIndex,
+                total: batchRanges.length,
+                message: `步骤 ${batchIndex + 1}/${batchRanges.length}：第 ${batchRange.start}-${batchRange.end} 章生成失败，正在重试（${attempt}/2）...`,
+                startedAt: outlineStartedAt,
+              });
+            }
+
+            const retryInstruction = attempt > 1
+              ? '\n\n重试补充要求：你上一次输出未通过校验。这一次请严格只输出合法 JSON，禁止输出任何解释、备注、Markdown 代码块或多余前后缀；chapters 数组必须完整且数量准确。'
+              : '';
+
+            const prompt = `${OUTLINE_BATCH_PROMPT
+              .replace('{{styleAnalysis}}', styleReference)
+              .replace('{{outlineModeInstruction}}', outlineModeInstruction)
+              .replace('{{highOriginalityInstruction}}', highOriginalityInstruction)
+              .replace('{{chapterCount}}', String(chapterCount))
+              .replaceAll('{{batchStartChapter}}', String(batchRange.start))
+              .replaceAll('{{batchEndChapter}}', String(batchRange.end))
+              .replaceAll('{{batchChapterCount}}', String(batchChapterCount))
+              .replace('{{globalStoryMemory}}', buildOutlineGlobalMemory(outlineTitle, mergedChapters, outlineAnchorCount))
+              .replace('{{recentOutlineContext}}', buildRecentOutlineContext(mergedChapters))}${retryInstruction}`;
+            const response = await callLLM({ config: llmConfig, prompt });
+            console.log(`Batch ${batchIndex + 1}/${batchRanges.length} attempt ${attempt}/2 response length:`, response.length);
+            console.log(`=== OUTLINE BATCH ${batchIndex + 1} ATTEMPT ${attempt} RESPONSE START ===`);
+            console.log(response);
+            console.log(`=== OUTLINE BATCH ${batchIndex + 1} ATTEMPT ${attempt} RESPONSE END ===`);
+
+            let outlineData: { title: string; chapters: OutlineItem[] };
+
+            try {
+              outlineData = parseOutlineResponse(response);
+            } catch (parseError) {
+              console.warn('Batch outline JSON parse failed, attempting salvage parse:', parseError);
+              outlineData = salvageOutlineResponse(response);
+              console.log('Salvaged outline chapters:', outlineData.chapters.length);
+            }
+
+            let normalizedCandidate = normalizeOutlineChaptersByNumbers(outlineData, expectedBatchChapterNumbers);
+
+            if (normalizedCandidate.chapters.length < expectedBatchChapterNumbers.length) {
+              const missingChapterNumbers = expectedBatchChapterNumbers.slice(normalizedCandidate.chapters.length);
+              setAnalysisProgress({
+                current: batchIndex,
+                total: batchRanges.length,
+                message: `步骤 ${batchIndex + 1}/${batchRanges.length}：第 ${batchRange.start}-${batchRange.end} 章数量不足，正在补齐缺失章节...`,
+                startedAt: outlineStartedAt,
+              });
+
+              const supplementPrompt = OUTLINE_BATCH_SUPPLEMENT_PROMPT
+                .replace('{{styleAnalysis}}', styleReference)
+                .replace('{{outlineModeInstruction}}', outlineModeInstruction)
+                .replace('{{highOriginalityInstruction}}', highOriginalityInstruction)
+                .replace('{{chapterCount}}', String(chapterCount))
+                .replace('{{batchStartChapter}}', String(batchRange.start))
+                .replace('{{batchEndChapter}}', String(batchRange.end))
+                .replace('{{currentBatchContext}}', buildCurrentBatchContext(normalizedCandidate.chapters))
+                .replace('{{globalStoryMemory}}', buildOutlineGlobalMemory(outlineTitle, mergedChapters, outlineAnchorCount))
+                .replace('{{recentOutlineContext}}', buildRecentOutlineContext(mergedChapters))
+                .replaceAll('{{missingChapterNumbers}}', missingChapterNumbers.map((chapterNumber) => `第${chapterNumber}章`).join('、'))
+                .replace('{{missingChapterCount}}', String(missingChapterNumbers.length));
+              const supplementResponse = await callLLM({ config: llmConfig, prompt: supplementPrompt });
+              console.log(`Batch ${batchIndex + 1}/${batchRanges.length} supplement response length:`, supplementResponse.length);
+              console.log(`=== OUTLINE BATCH ${batchIndex + 1} SUPPLEMENT RESPONSE START ===`);
+              console.log(supplementResponse);
+              console.log(`=== OUTLINE BATCH ${batchIndex + 1} SUPPLEMENT RESPONSE END ===`);
+
+              let supplementData: { title: string; chapters: OutlineItem[] };
+
+              try {
+                supplementData = parseOutlineResponse(supplementResponse);
+              } catch (parseError) {
+                console.warn('Supplement outline JSON parse failed, attempting salvage parse:', parseError);
+                supplementData = salvageOutlineResponse(supplementResponse);
+                console.log('Salvaged supplement chapters:', supplementData.chapters.length);
+              }
+
+              const normalizedSupplement = normalizeOutlineChaptersByNumbers(supplementData, missingChapterNumbers);
+              normalizedCandidate = {
+                title: normalizedCandidate.title || normalizedSupplement.title,
+                chapters: [...normalizedCandidate.chapters, ...normalizedSupplement.chapters],
+              };
+            }
+
+            normalizedBatch = normalizeOutlineBatchResponse(normalizedCandidate, batchRange.start, batchRange.end);
+            break;
+          } catch (batchError) {
+            lastBatchError = batchError;
+            console.warn(`Outline batch ${batchIndex + 1}/${batchRanges.length} attempt ${attempt}/2 failed:`, batchError);
+          }
+        }
+
+        if (!normalizedBatch) {
+          const errorMessage = lastBatchError instanceof Error ? lastBatchError.message : '未知错误';
+          throw new Error(`第 ${batchRange.start}-${batchRange.end} 章大纲生成失败，已自动重试 1 次：${errorMessage}`);
+        }
+
+        outlineTitle = outlineTitle || normalizedBatch.title;
+        mergedChapters.push(...normalizedBatch.chapters);
+
+        setAnalysisProgress({
+          current: batchIndex + 1,
+          total: batchRanges.length,
+          message: batchIndex < batchRanges.length - 1
+            ? `第 ${batchRange.start}-${batchRange.end} 章已生成，正在整理前文上下文...`
+            : '所有批次已生成完成，正在保存大纲...',
+          startedAt: outlineStartedAt,
+        });
       }
 
       const now = Date.now();
       const newOutline: NovelOutline = {
         id: String(now),
-        title: outlineData.title || 'New Novel',
-        chapters: outlineData.chapters,
+        title: outlineTitle || 'New Novel',
+        chapters: mergedChapters,
         coreSummary: '',
         createdAt: now,
         updatedAt: now,
@@ -941,8 +1355,11 @@ function App() {
     } catch (err) {
       console.error('生成大纲失败:', err);
       alert('生成大纲失败: ' + (err instanceof Error ? err.message : '未知错误'));
+    } finally {
+      setIsGeneratingOutline(false);
+      setAnalysisProgress(null);
     }
-  }, [callLLM, highOriginalityMode, llmConfig, outlineGenerationMode, saveOutlineData, setActiveOutlineId, setOutline, styleAnalysis]);
+  }, [callLLM, highOriginalityMode, llmConfig, outlineAnchorCount, outlineGenerationMode, saveOutlineData, setActiveOutlineId, setOutline, styleAnalysis]);
 
   const handleNovelUploaded = useCallback(async (content: string) => {
     console.log('handleNovelUploaded called, content length:', content.length);
@@ -1210,6 +1627,10 @@ function App() {
   }, []);
 
   const handleGenerateOutline = useCallback(() => {
+    if (isGeneratingOutline) {
+      return;
+    }
+
     const normalized = normalizeOutlineChapterCount(Number.parseInt(outlineChapterCountInput, 10));
     setOutlineChapterCountInput(String(normalized));
     saveOutlineChapterCount(normalized);
@@ -1224,7 +1645,7 @@ function App() {
     }
 
     void generateOutline(normalized, analysisForOutline ?? undefined);
-  }, [generateOutline, isEditingAnalysis, outlineChapterCountInput, saveEditedAnalysis, savedAnalysis]);
+  }, [generateOutline, isEditingAnalysis, isGeneratingOutline, outlineChapterCountInput, saveEditedAnalysis, savedAnalysis]);
 
   return (
     <div className="App">
@@ -1445,12 +1866,47 @@ function App() {
                 )}
               </div>
               <div style={{ marginBottom: '20px' }}>
+                <h3>全局记忆强度</h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  {OUTLINE_ANCHOR_COUNT_OPTIONS.map((option) => (
+                    <label
+                      key={option.value}
+                      style={{
+                        display: 'block',
+                        border: '1px solid #e5e7eb',
+                        borderRadius: '10px',
+                        padding: '12px',
+                        backgroundColor: outlineAnchorCount === option.value ? '#f5f3ff' : '#fff',
+                        cursor: isGeneratingOutline ? 'not-allowed' : 'pointer',
+                        opacity: isGeneratingOutline ? 0.7 : 1,
+                      }}
+                    >
+                      <input
+                        type="radio"
+                        name="outline-anchor-count"
+                        value={option.value}
+                        checked={outlineAnchorCount === option.value}
+                        disabled={isGeneratingOutline}
+                        onChange={() => {
+                          setOutlineAnchorCount(option.value);
+                          saveOutlineAnchorCount(option.value);
+                        }}
+                        style={{ marginRight: '8px' }}
+                      />
+                      <strong>{option.label}</strong>
+                      <div style={{ marginTop: '6px', color: '#4b5563', lineHeight: 1.6 }}>{option.description}</div>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div style={{ marginBottom: '20px' }}>
                 <label htmlFor="outline-chapter-count" style={{ display: 'block', marginBottom: '8px', fontWeight: 600 }}>
                   大纲章节数
                 </label>
                 <input
                   id="outline-chapter-count"
                   type="number"
+                  disabled={isGeneratingOutline}
                   min={MIN_OUTLINE_CHAPTER_COUNT}
                   max={MAX_OUTLINE_CHAPTER_COUNT}
                   step={1}
@@ -1466,12 +1922,22 @@ function App() {
                 <div style={{ marginTop: '6px', fontSize: '12px', color: '#6b7280' }}>
                   支持 {MIN_OUTLINE_CHAPTER_COUNT}-{MAX_OUTLINE_CHAPTER_COUNT} 章
                 </div>
+                <div style={{ marginTop: '4px', fontSize: '12px', color: '#6b7280', lineHeight: 1.7 }}>
+                  为避免模型上下文过长，系统会按每批最多 {OUTLINE_BATCH_CHAPTER_LIMIT} 章分批生成，并优先参考全局故事记忆与最近两批大纲来续写后续批次。
+                  <br />
+                  当前全局记忆强度为 {outlineAnchorCount} 个锚点，可在上方切换精简 / 标准 / 增强档位。
+                  <br />
+                  如果某一批生成失败，系统会自动重试 1 次；如果某一批章节数量不足，系统会优先只补齐缺失章节，再继续后续流程。
+                  <br />
+                  如果模型重复返回同一章节，系统会自动去重后再合并到最终大纲。
+                </div>
               </div>
               <button
                 onClick={handleGenerateOutline}
+                disabled={isGeneratingOutline}
                 style={{ padding: '10px 20px', fontSize: '16px' }}
               >
-                生成大纲
+                {isGeneratingOutline ? '正在分批生成大纲...' : '生成大纲'}
               </button>
             </>
           ) : (
@@ -1489,6 +1955,9 @@ function App() {
           onGenerateChapter={handleGenerateChapter}
           onCheckContinuity={handleCheckOutlineContinuity}
           isCheckingContinuity={isCheckingOutlineContinuity}
+          globalMemorySummary={buildOutlineGlobalMemory(outline.title, outline.chapters, outlineAnchorCount)}
+          recentOutlineSummary={buildRecentOutlineContext(outline.chapters)}
+          outlineAnchorCount={outlineAnchorCount}
         />
       )}
 

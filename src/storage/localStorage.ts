@@ -19,9 +19,11 @@ const OUTLINE_CHAPTER_COUNT_KEY = 'outline-chapter-count';
 const OUTLINE_GENERATION_MODE_KEY = 'outline-generation-mode';
 const HIGH_ORIGINALITY_MODE_KEY = 'high-originality-mode';
 const ANALYSIS_DEPTH_MODE_KEY = 'analysis-depth-mode';
+const OUTLINE_ANCHOR_COUNT_KEY = 'outline-anchor-count';
 
 export type OutlineGenerationMode = 'faithful' | 'blend' | 'forced';
 export type AnalysisDepthMode = 'quick' | 'deep';
+export type OutlineAnchorCount = 6 | 8 | 10;
 
 export function saveLLMConfig(config: LLMConfig): void {
   localStorage.setItem(LLM_CONFIG_KEY, JSON.stringify(config));
@@ -128,4 +130,17 @@ export function loadAnalysisDepthMode(): AnalysisDepthMode {
   }
 
   return 'quick';
+}
+
+export function saveOutlineAnchorCount(count: OutlineAnchorCount): void {
+  localStorage.setItem(OUTLINE_ANCHOR_COUNT_KEY, String(count));
+}
+
+export function loadOutlineAnchorCount(): OutlineAnchorCount {
+  const value = localStorage.getItem(OUTLINE_ANCHOR_COUNT_KEY);
+  if (value === '6' || value === '10') {
+    return Number.parseInt(value, 10) as OutlineAnchorCount;
+  }
+
+  return 8;
 }

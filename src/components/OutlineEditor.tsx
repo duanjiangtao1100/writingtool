@@ -24,6 +24,7 @@ interface OutlineContinuityCheck {
   overallVerdict: string;
   summary: string;
   issues: ContinuityIssue[];
+  usedFallback?: boolean;
 }
 
 interface NovelOutline {
@@ -42,6 +43,9 @@ interface OutlineEditorProps {
   onGenerateChapter: (chapterIndex: number) => void;
   onCheckContinuity: () => void | Promise<void>;
   isCheckingContinuity?: boolean;
+  globalMemorySummary?: string;
+  recentOutlineSummary?: string;
+  outlineAnchorCount?: number;
 }
 
 export function OutlineEditor({
@@ -50,6 +54,9 @@ export function OutlineEditor({
   onGenerateChapter,
   onCheckContinuity,
   isCheckingContinuity = false,
+  globalMemorySummary,
+  recentOutlineSummary,
+  outlineAnchorCount,
 }: OutlineEditorProps) {
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editTitle, setEditTitle] = useState('');
@@ -105,6 +112,37 @@ export function OutlineEditor({
           style={{ width: '100%', height: '100px', padding: '8px' }}
         />
       </div>
+      {(globalMemorySummary || recentOutlineSummary) && (
+        <div style={{ marginBottom: '20px', padding: '16px', border: '1px solid #ddd6fe', borderRadius: '12px', backgroundColor: '#faf5ff' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap', marginBottom: '12px' }}>
+            <h3 style={{ margin: 0 }}>全局记忆概览</h3>
+            {outlineAnchorCount ? (
+              <span style={{ fontSize: '12px', color: '#6d28d9', backgroundColor: '#ede9fe', borderRadius: '999px', padding: '4px 10px', fontWeight: 600 }}>
+                当前锚点数：{outlineAnchorCount}
+              </span>
+            ) : null}
+          </div>
+          <div style={{ fontSize: '13px', color: '#6b7280', marginBottom: '12px', lineHeight: 1.6 }}>
+            这里展示系统用于后续批次续写的全局故事记忆，帮助你快速理解整部小说的主线走向、关键转折和最近阶段状态。
+          </div>
+          {globalMemorySummary && (
+            <div style={{ marginBottom: recentOutlineSummary ? '14px' : 0 }}>
+              <div style={{ fontWeight: 700, marginBottom: '8px', color: '#581c87' }}>整体走向 / 关键故事线</div>
+              <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.7, color: '#111827', backgroundColor: '#fff', border: '1px solid #e9d5ff', borderRadius: '10px', padding: '12px' }}>
+                {globalMemorySummary}
+              </div>
+            </div>
+          )}
+          {recentOutlineSummary && (
+            <div>
+              <div style={{ fontWeight: 700, marginBottom: '8px', color: '#581c87' }}>最近两批走势</div>
+              <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.7, color: '#111827', backgroundColor: '#fff', border: '1px solid #e9d5ff', borderRadius: '10px', padding: '12px' }}>
+                {recentOutlineSummary}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       <div style={{ marginBottom: '20px', padding: '16px', border: '1px solid #e5e7eb', borderRadius: '12px', backgroundColor: '#fff' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', gap: '12px', flexWrap: 'wrap' }}>
           <h3 style={{ margin: 0 }}>章节故事剧情连贯性检查</h3>
@@ -118,10 +156,19 @@ export function OutlineEditor({
             <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginBottom: '10px', fontSize: '13px', color: '#4b5563' }}>
               <span>总体判断：{continuityCheck.overallVerdict || '已完成检查'}</span>
               <span>检查时间：{new Date(continuityCheck.checkedAt).toLocaleString()}</span>
+              {continuityCheck.usedFallback && (
+                <span style={{ color: '#b45309', fontWeight: 600 }}>当前结果为容错解析版，建议必要时重试一次</span>
+              )}
               {isContinuityCheckStale && (
                 <span style={{ color: '#b45309', fontWeight: 600 }}>当前大纲已更新，结果可能已过期</span>
               )}
             </div>
+
+            {continuityCheck.usedFallback && (
+              <div style={{ marginBottom: '12px', padding: '10px 12px', borderRadius: '8px', backgroundColor: '#fffbeb', color: '#92400e', lineHeight: 1.6 }}>
+                本次连贯性检查的模型返回并非完整 JSON，系统已自动进行容错解析并尽量还原结果；如果你想获得更稳定的检查结论，建议点击“重新检查”。
+              </div>
+            )}
 
             <div style={{ marginBottom: '12px', color: '#374151', lineHeight: 1.6 }}>
               {continuityCheck.summary || '已完成连贯性检查，当前未返回摘要。'}

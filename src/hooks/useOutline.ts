@@ -24,6 +24,7 @@ interface OutlineContinuityCheck {
   overallVerdict: string;
   summary: string;
   issues: ContinuityIssue[];
+  usedFallback?: boolean;
 }
 
 interface NovelOutline {
