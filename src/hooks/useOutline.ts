@@ -10,11 +10,28 @@ interface OutlineItem {
   description: string;
 }
 
+interface ContinuityIssue {
+  id: string;
+  chapterRange: string;
+  severity: 'high' | 'medium' | 'low';
+  problem: string;
+  impact: string;
+  suggestion: string;
+}
+
+interface OutlineContinuityCheck {
+  checkedAt: number;
+  overallVerdict: string;
+  summary: string;
+  issues: ContinuityIssue[];
+}
+
 interface NovelOutline {
   id: string;
   title: string;
   chapters: OutlineItem[];
   coreSummary: string;
+  continuityCheck?: OutlineContinuityCheck | null;
   createdAt: number;
   updatedAt: number;
 }

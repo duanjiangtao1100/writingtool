@@ -38,11 +38,28 @@ interface OutlineItem {
   description: string;
 }
 
+interface ContinuityIssue {
+  id: string;
+  chapterRange: string;
+  severity: 'high' | 'medium' | 'low';
+  problem: string;
+  impact: string;
+  suggestion: string;
+}
+
+interface OutlineContinuityCheck {
+  checkedAt: number;
+  overallVerdict: string;
+  summary: string;
+  issues: ContinuityIssue[];
+}
+
 interface NovelOutline {
   id: string;
   title: string;
   chapters: OutlineItem[];
   coreSummary: string;
+  continuityCheck?: OutlineContinuityCheck | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -53,11 +70,30 @@ interface StyleAnalysis {
   plotPatternAnalysis: string;
 }
 
+interface ChapterSection {
+  chapterNumber: number;
+  heading: string;
+  content: string;
+}
+
+interface PlotChunkAnalysis {
+  chapterRange: string;
+  mainProgression: string;
+  conflictPattern: string;
+  turningPoints: string[];
+  pacingRhythm: string;
+  objectiveNotes: string;
+}
+
 type AppState = 'settings' | 'upload' | 'analysis' | 'outline' | 'chapters';
 
 const DEFAULT_OUTLINE_CHAPTER_COUNT = 50;
 const MIN_OUTLINE_CHAPTER_COUNT = 1;
 const MAX_OUTLINE_CHAPTER_COUNT = 50;
+const MIN_DEEP_PLOT_ANALYSIS_CHAPTERS = 200;
+const MAX_DEEP_PLOT_ANALYSIS_CHAPTERS = 300;
+const MAX_PLOT_ANALYSIS_CHUNK_CHAPTERS = 30;
+const MAX_PLOT_ANALYSIS_CHUNK_CHARACTERS = 28000;
 
 function normalizeOutlineChapterCount(value: number): number {
   if (!Number.isFinite(value)) {
@@ -72,6 +108,118 @@ function parseKeyElementsInput(text: string): string[] {
     .split(/\r?\n/)
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+}
+
+function sanitizeAnalysisText(text: string, maxLength: number): string {
+  return text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, maxLength);
+}
+
+function extractChapterSections(content: string): ChapterSection[] {
+  const normalizedContent = content.replace(/\r\n/g, '\n');
+  const headingPattern = /^(\s*(?:第[0-9一二三四五六七八九十百千万零〇两]+[章节回卷集部篇幕]|chapter\s+\d+|chap\.?\s*\d+)[^\n]*)$/gim;
+  const matches = Array.from(normalizedContent.matchAll(headingPattern));
+
+  if (matches.length === 0) {
+    return [];
+  }
+
+  return matches
+    .map((match, index) => {
+      const heading = match[1].trim();
+      const startIndex = match.index ?? 0;
+      const nextStartIndex = index < matches.length - 1 ? (matches[index + 1].index ?? normalizedContent.length) : normalizedContent.length;
+      const sectionContent = normalizedContent.slice(startIndex, nextStartIndex).trim();
+
+      return {
+        chapterNumber: index + 1,
+        heading,
+        content: sectionContent,
+      };
+    })
+    .filter((section) => section.content.length > 0);
+}
+
+function selectChaptersForDeepPlotAnalysis(chapters: ChapterSection[]): ChapterSection[] {
+  if (chapters.length === 0) {
+    return [];
+  }
+
+  const targetCount = chapters.length >= MIN_DEEP_PLOT_ANALYSIS_CHAPTERS
+    ? Math.min(MAX_DEEP_PLOT_ANALYSIS_CHAPTERS, chapters.length)
+    : chapters.length;
+
+  return chapters.slice(0, targetCount);
+}
+
+function chunkChaptersForPlotAnalysis(chapters: ChapterSection[]): ChapterSection[][] {
+  const chunks: ChapterSection[][] = [];
+  let currentChunk: ChapterSection[] = [];
+  let currentLength = 0;
+
+  for (const chapter of chapters) {
+    const chapterLength = chapter.content.length;
+    const shouldStartNewChunk =
+      currentChunk.length > 0 && (
+        currentChunk.length >= MAX_PLOT_ANALYSIS_CHUNK_CHAPTERS ||
+        currentLength + chapterLength > MAX_PLOT_ANALYSIS_CHUNK_CHARACTERS
+      );
+
+    if (shouldStartNewChunk) {
+      chunks.push(currentChunk);
+      currentChunk = [];
+      currentLength = 0;
+    }
+
+    currentChunk.push(chapter);
+    currentLength += chapterLength;
+  }
+
+  if (currentChunk.length > 0) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks;
+}
+
+function formatChapterChunk(chapters: ChapterSection[]): string {
+  return chapters
+    .map((chapter) => sanitizeAnalysisText(chapter.content, 4000))
+    .join('\n\n');
+}
+
+function buildStyleAnalysisSample(content: string, chapters: ChapterSection[]): string {
+  if (chapters.length === 0) {
+    return sanitizeAnalysisText(content, 18000);
+  }
+
+  const sampledSections = [
+    chapters[0],
+    chapters[Math.floor((chapters.length - 1) / 2)],
+    chapters[chapters.length - 1],
+  ].filter((section, index, array) => array.findIndex((item) => item.chapterNumber === section.chapterNumber) === index);
+
+  return sampledSections
+    .map((section) => sanitizeAnalysisText(section.content, 5000))
+    .join('\n\n');
+}
+
+function parsePlotChunkAnalysisResponse(response: string): PlotChunkAnalysis {
+  const parsed = extractAndParseJSON(response);
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Plot chunk analysis response is not a JSON object');
+  }
+
+  return {
+    chapterRange: typeof parsed.chapterRange === 'string' ? parsed.chapterRange.trim() : '未知章节范围',
+    mainProgression: typeof parsed.mainProgression === 'string' ? parsed.mainProgression.trim() : '',
+    conflictPattern: typeof parsed.conflictPattern === 'string' ? parsed.conflictPattern.trim() : '',
+    turningPoints: Array.isArray(parsed.turningPoints)
+      ? parsed.turningPoints.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean)
+      : [],
+    pacingRhythm: typeof parsed.pacingRhythm === 'string' ? parsed.pacingRhythm.trim() : '',
+    objectiveNotes: typeof parsed.objectiveNotes === 'string' ? parsed.objectiveNotes.trim() : '',
+  };
 }
 
 function extractAndParseJSON(text: string): any {
@@ -235,7 +383,95 @@ function salvageOutlineResponse(response: string): { title: string; chapters: Ou
   return { title, chapters };
 }
 
-const ANALYSIS_PROMPT = `你是一个专业的小说风格分析师。请分析以下小说的写作风格。
+function normalizeContinuitySeverity(value: unknown): ContinuityIssue['severity'] {
+  if (value === 'high' || value === '严重' || value === 'high_risk') {
+    return 'high';
+  }
+
+  if (value === 'low' || value === '轻微' || value === 'minor') {
+    return 'low';
+  }
+
+  return 'medium';
+}
+
+function parseOutlineContinuityCheckResponse(response: string): OutlineContinuityCheck {
+  const parsed = extractAndParseJSON(response);
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Continuity check response is not a JSON object');
+  }
+
+  const rawIssues = Array.isArray(parsed.issues)
+    ? parsed.issues
+    : Array.isArray(parsed.problems)
+      ? parsed.problems
+      : [];
+
+  const summary =
+    typeof parsed.summary === 'string'
+      ? parsed.summary.trim()
+      : typeof parsed.conclusion === 'string'
+        ? parsed.conclusion.trim()
+        : typeof parsed['总结'] === 'string'
+          ? parsed['总结'].trim()
+          : '';
+
+  const overallVerdict =
+    typeof parsed.overallVerdict === 'string'
+      ? parsed.overallVerdict.trim()
+      : typeof parsed.verdict === 'string'
+        ? parsed.verdict.trim()
+        : typeof parsed.overallAssessment === 'string'
+          ? parsed.overallAssessment.trim()
+          : typeof parsed['总体判断'] === 'string'
+            ? parsed['总体判断'].trim()
+            : '已完成检查';
+
+  return {
+    checkedAt: Date.now(),
+    overallVerdict,
+    summary,
+    issues: rawIssues
+      .map((issue: any, index: number): ContinuityIssue => ({
+        id: String(index + 1),
+        chapterRange:
+          typeof issue?.chapterRange === 'string' && issue.chapterRange.trim()
+            ? issue.chapterRange.trim()
+            : typeof issue?.chapter === 'string' && issue.chapter.trim()
+              ? issue.chapter.trim()
+              : typeof issue?.chapterNumber === 'number'
+                ? `第${issue.chapterNumber}章`
+                : '待定位章节',
+        severity: normalizeContinuitySeverity(issue?.severity),
+        problem:
+          typeof issue?.problem === 'string' && issue.problem.trim()
+            ? issue.problem.trim()
+            : typeof issue?.issue === 'string' && issue.issue.trim()
+              ? issue.issue.trim()
+              : typeof issue?.description === 'string'
+                ? issue.description.trim()
+                : '',
+        impact:
+          typeof issue?.impact === 'string' && issue.impact.trim()
+            ? issue.impact.trim()
+            : typeof issue?.risk === 'string'
+              ? issue.risk.trim()
+              : '',
+        suggestion:
+          typeof issue?.suggestion === 'string' && issue.suggestion.trim()
+            ? issue.suggestion.trim()
+            : typeof issue?.recommendation === 'string' && issue.recommendation.trim()
+              ? issue.recommendation.trim()
+              : typeof issue?.fix === 'string'
+                ? issue.fix.trim()
+                : '',
+      }))
+      .filter((issue) => issue.problem || issue.impact || issue.suggestion),
+  };
+}
+
+const ANALYSIS_PROMPT = `你是一个专业的小说风格分析师。请分析以下小说样本的写作风格。
 
 请输出以下内容：
 1. 风格描述：用一段话描述这部小说的整体风格。
@@ -243,15 +479,49 @@ const ANALYSIS_PROMPT = `你是一个专业的小说风格分析师。请分析�
 
 小说内容：{{novelContent}}
 
-请额外输出 'plotPatternAnalysis' 字段，总结这部小说的剧情推进模式（例如起承转合、冲突节奏、常见反转与高潮分布）。
-该字段请优先使用“剧情链路 + 节奏总结”的一句话格式，例如：受辱 -> 得奇遇 -> 苦修 -> 打脸升级 -> 遇更强敌 -> 再苦修 -> 再次打脸。节奏明快，爽点密集。
-
 请严格输出 JSON：
 {
   "styleDescription": "...",
-  "keyElements": ["元素1", "元素2"],
-  "plotPatternAnalysis": "受辱 -> 得奇遇 -> 苦修 -> 打脸升级 -> 遇更强敌 -> 再苦修 -> 再次打脸。节奏明快，爽点密集。"
+  "keyElements": ["元素1", "元素2"]
 }`;
+
+const PLOT_CHUNK_ANALYSIS_PROMPT = `你是一位专业的网文剧情编辑，请只基于以下章节原文，客观提炼这一段剧情推进规律。
+
+分析范围：{{chapterRange}}
+
+章节内容：
+{{chapterContent}}
+
+要求：
+1. 只总结文本中已经出现的剧情规律，不要脑补后文。
+2. 重点观察主线推进、冲突触发方式、升级节奏、反转/高潮分布。
+3. 表述保持客观，尽量使用“常见/多为/通常/偶尔”等词。
+4. 严格输出 JSON，不要附加解释。
+
+输出格式：
+{
+  "chapterRange": "第1-30章",
+  "mainProgression": "这一段主线如何推进",
+  "conflictPattern": "冲突通常如何发起、升级、收束",
+  "turningPoints": ["转折1", "转折2"],
+  "pacingRhythm": "节奏特征",
+  "objectiveNotes": "补充的客观观察"
+}`;
+
+const PLOT_PATTERN_SYNTHESIS_PROMPT = `你是一位专业的网文策划编辑。下面是对一部小说前 {{sampledChapterCount}} 章的分段剧情分析结果。
+
+分段分析：
+{{chunkAnalyses}}
+
+请把这些结果整合为一段更客观的“剧情模式分析”。
+
+要求：
+1. 明确说明这是“基于前 {{sampledChapterCount}} 章样本”的结论；如果样本不足 200 章，也要如实说明基于现有全部章节。
+2. 不要只复述开篇剧情，要总结长线主线、阶段性循环、常见冲突触发方式、升级/反转/高潮分布。
+3. 语气客观，不夸张，不脑补未出现的内容。
+4. 优先使用“剧情链路 + 节奏总结”的表达，但允许比一句话稍展开。
+5. 只输出纯文本，不要 JSON，不要列表。
+`;
 
 const OUTLINE_PROMPT = `你是一个专业的网络小说作者。
 参考小说风格：
@@ -299,6 +569,39 @@ const SUMMARY_PROMPT = `请把以下章节内容精炼成一个简短的核心�
 
 请直接输出摘要文本。`;
 
+const OUTLINE_CONTINUITY_CHECK_PROMPT = `你是一位长篇网络小说的剧情统筹编辑，请检查下面这份小说大纲的章节故事剧情连贯性。
+
+风格分析（如有）：
+{{styleAnalysis}}
+
+待检查大纲：
+{{outline}}
+
+请重点检查：
+1. 关键事件的因果链是否完整。
+2. 主角动机、目标与阶段变化是否连贯。
+3. 重要人物、设定、伏笔是否前后矛盾或遗失。
+4. 章节节奏衔接是否突兀，是否存在明显跳步。
+5. 高潮、转折、升级是否铺垫不足或重复。
+
+请严格输出 JSON，不要附加解释文字。issues 最多返回 8 条，按严重程度排序。
+如果没有明显问题，issues 返回空数组。
+
+输出格式：
+{
+  "overallVerdict": "整体连贯/存在少量问题/存在明显问题",
+  "summary": "用 1-2 句话概括整份大纲的连贯性表现",
+  "issues": [
+    {
+      "chapterRange": "第3-5章",
+      "severity": "high",
+      "problem": "问题描述",
+      "impact": "会导致什么阅读问题",
+      "suggestion": "如何修改更顺"
+    }
+  ]
+}`;
+
 function App() {
   const [appState, setAppState] = useState<AppState>(() => (loadLLMConfig() ? 'upload' : 'settings'));
   const [llmConfig, setLLMConfig] = useState<LLMConfig | null>(() => loadLLMConfig());
@@ -313,6 +616,7 @@ function App() {
   const [editedStyleDescription, setEditedStyleDescription] = useState('');
   const [editedKeyElements, setEditedKeyElements] = useState('');
   const [editedPlotPatternAnalysis, setEditedPlotPatternAnalysis] = useState('');
+  const [isCheckingOutlineContinuity, setIsCheckingOutlineContinuity] = useState(false);
 
   const { isLoading, error, callLLM } = useLLM();
   const { outline, allOutlines, saveOutlineData, setOutline } = useOutline(currentOutlineId || undefined);
@@ -405,22 +709,69 @@ function App() {
 
     try {
       console.log('Starting analysis...');
-      const prompt = ANALYSIS_PROMPT.replace('{{novelContent}}', content.slice(0, 10000));
-      console.log('Calling LLM...');
-      const response = await callLLM({ config: llmConfig, prompt });
-      console.log('LLM response:', response);
+      const extractedChapters = extractChapterSections(content);
+      const deepPlotAnalysisChapters = selectChaptersForDeepPlotAnalysis(extractedChapters);
+      const styleSample = buildStyleAnalysisSample(content, deepPlotAnalysisChapters.length > 0 ? deepPlotAnalysisChapters : extractedChapters);
 
-      let analysis: StyleAnalysis;
+      const stylePrompt = ANALYSIS_PROMPT.replace('{{novelContent}}', styleSample);
+      console.log('Calling LLM for style analysis...');
+      const styleResponse = await callLLM({ config: llmConfig, prompt: stylePrompt });
+      console.log('Style analysis response:', styleResponse);
+
+      let baseAnalysis: StyleAnalysis;
       try {
-        analysis = parseStyleAnalysisResponse(response);
-        console.log('Parsed analysis:', analysis);
+        baseAnalysis = parseStyleAnalysisResponse(styleResponse);
+        console.log('Parsed style analysis:', baseAnalysis);
       } catch {
-        analysis = {
-          styleDescription: response.trim(),
+        baseAnalysis = {
+          styleDescription: styleResponse.trim(),
           keyElements: ['analysis completed'],
           plotPatternAnalysis: '',
         };
       }
+
+      let plotPatternAnalysis = '';
+
+      if (deepPlotAnalysisChapters.length > 0) {
+        const chapterChunks = chunkChaptersForPlotAnalysis(deepPlotAnalysisChapters);
+        const chunkAnalyses: PlotChunkAnalysis[] = [];
+
+        for (const chunk of chapterChunks) {
+          const chapterRange = `第${chunk[0].chapterNumber}-${chunk[chunk.length - 1].chapterNumber}章`;
+          const plotChunkPrompt = PLOT_CHUNK_ANALYSIS_PROMPT
+            .replace('{{chapterRange}}', chapterRange)
+            .replace('{{chapterContent}}', formatChapterChunk(chunk));
+
+          const chunkResponse = await callLLM({ config: llmConfig, prompt: plotChunkPrompt });
+          chunkAnalyses.push(parsePlotChunkAnalysisResponse(chunkResponse));
+        }
+
+        const synthesisPrompt = PLOT_PATTERN_SYNTHESIS_PROMPT
+          .replaceAll('{{sampledChapterCount}}', String(deepPlotAnalysisChapters.length))
+          .replace('{{chunkAnalyses}}', JSON.stringify(chunkAnalyses, null, 2));
+
+        plotPatternAnalysis = (await callLLM({ config: llmConfig, prompt: synthesisPrompt })).trim();
+      } else {
+        const fallbackPrompt = PLOT_PATTERN_SYNTHESIS_PROMPT
+          .replaceAll('{{sampledChapterCount}}', '0')
+          .replace('{{chunkAnalyses}}', JSON.stringify([
+            {
+              chapterRange: '未识别章节标题，按全文片段分析',
+              mainProgression: '无法稳定切分章节，建议上传带明确章节标题的文本以获得更客观的长线剧情分析。',
+              conflictPattern: '',
+              turningPoints: [],
+              pacingRhythm: '',
+              objectiveNotes: '当前文本没有识别出稳定的章节边界。',
+            },
+          ], null, 2));
+
+        plotPatternAnalysis = (await callLLM({ config: llmConfig, prompt: fallbackPrompt })).trim();
+      }
+
+      const analysis: StyleAnalysis = {
+        ...baseAnalysis,
+        plotPatternAnalysis,
+      };
 
       saveStyleAnalysis(analysis);
       console.log('Saved to localStorage');
@@ -483,6 +834,45 @@ function App() {
       alert('生成章节失败: ' + (err instanceof Error ? err.message : '未知错误'));
     }
   }, [callLLM, getPreviousChaptersSummary, llmConfig, outline, saveChapterData, saveOutlineData, styleAnalysis]);
+
+  const handleCheckOutlineContinuity = useCallback(async () => {
+    if (!llmConfig || !outline) {
+      alert('请先配置 LLM 并生成大纲');
+      return;
+    }
+
+    const currentStyleAnalysis = styleAnalysis && styleAnalysis.styleDescription ? styleAnalysis : loadStyleAnalysis();
+
+    setIsCheckingOutlineContinuity(true);
+    try {
+      const prompt = OUTLINE_CONTINUITY_CHECK_PROMPT
+        .replace('{{styleAnalysis}}', currentStyleAnalysis ? JSON.stringify(currentStyleAnalysis, null, 2) : '暂无')
+        .replace('{{outline}}', JSON.stringify({
+          title: outline.title,
+          coreSummary: outline.coreSummary,
+          chapters: outline.chapters,
+        }, null, 2));
+
+      const response = await callLLM({ config: llmConfig, prompt });
+      const checkResult = parseOutlineContinuityCheckResponse(response);
+      const now = Date.now();
+      const updatedOutline: NovelOutline = {
+        ...outline,
+        continuityCheck: {
+          ...checkResult,
+          checkedAt: now,
+        },
+        updatedAt: now,
+      };
+
+      await saveOutlineData(updatedOutline);
+    } catch (err) {
+      console.error('剧情连贯性检查失败:', err);
+      alert('剧情连贯性检查失败: ' + (err instanceof Error ? err.message : '未知错误'));
+    } finally {
+      setIsCheckingOutlineContinuity(false);
+    }
+  }, [callLLM, llmConfig, outline, saveOutlineData, styleAnalysis]);
 
   const savedAnalysis = styleAnalysis && styleAnalysis.styleDescription ? styleAnalysis : loadStyleAnalysis();
 
@@ -689,7 +1079,13 @@ function App() {
       )}
 
       {appState === 'outline' && outline && (
-        <OutlineEditor outline={outline} onUpdate={saveOutlineData} onGenerateChapter={handleGenerateChapter} />
+        <OutlineEditor
+          outline={outline}
+          onUpdate={saveOutlineData}
+          onGenerateChapter={handleGenerateChapter}
+          onCheckContinuity={handleCheckOutlineContinuity}
+          isCheckingContinuity={isCheckingOutlineContinuity}
+        />
       )}
 
       {appState === 'chapters' && (
